@@ -24,6 +24,7 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [scale, setScale] = useState(0.8);
   const [renderedPages, setRenderedPages] = useState<Set<number>>(new Set());
+  const [pageSizes, setPageSizes] = useState<Map<number, { width: number; height: number }>>(new Map());
   const colors = useThemeColors();
 
   // Load PDF document
@@ -56,6 +57,16 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
         
         setPdfDoc(pdf);
         setTotalPages(pdf.numPages);
+        
+        // 预先获取所有页面的尺寸
+        const sizes = new Map<number, { width: number; height: number }>();
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const viewport = page.getViewport({ scale: 0.8 }); // 使用默认 scale
+          sizes.set(i, { width: viewport.width, height: viewport.height });
+        }
+        setPageSizes(sizes);
+        
         setLoading(false);
       } catch (err: any) {
         console.error('Failed to load PDF:', err);
@@ -235,8 +246,6 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
               background: '#fff',
               boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
               borderRadius: 4,
-              minHeight: 200,
-              minWidth: 150,
             }}
           >
             {/* Page number indicator */}
@@ -268,9 +277,8 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  background: 'rgba(255,255,255,0.8)',
+                  background: 'rgba(255,255,255,0.9)',
                   zIndex: 10,
-                  minHeight: 200,
                 }}
               >
                 <Spin size="small" />
