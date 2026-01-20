@@ -137,6 +137,11 @@ export const MainLayout: React.FC = () => {
     };
   }, [settings.theme]);
 
+  // 同步主题到 document 属性（用于 CSS 滚动条等全局样式）
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', settings.theme);
+  }, [settings.theme]);
+
   return (
     <ConfigProvider
       theme={{

@@ -17,11 +17,12 @@ interface PdfPreviewProps {
 export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRefs = useRef<Map<number, HTMLCanvasElement>>(new Map());
+  const renderingRef = useRef<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [totalPages, setTotalPages] = useState(0);
   const [pdfDoc, setPdfDoc] = useState<any>(null);
-  const [scale, setScale] = useState(1.0);
+  const [scale, setScale] = useState(0.8);
   const [renderedPages, setRenderedPages] = useState<Set<number>>(new Set());
   const colors = useThemeColors();
 
@@ -35,6 +36,7 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
       setPdfDoc(null);
       setRenderedPages(new Set());
       canvasRefs.current.clear();
+      renderingRef.current.clear();
       
       try {
         const fileData = await readFile(filePath);
@@ -71,43 +73,91 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
     };
   }, [filePath]);
 
-  // Render all pages when PDF is loaded or scale changes
+  // 渲染单页
+  const renderPage = useCallback(async (pageNum: number) => {
+    if (!pdfDoc) return;
+    if (renderingRef.current.has(pageNum)) return;
+    
+    const canvas = canvasRefs.current.get(pageNum);
+    if (!canvas) return;
+    
+    renderingRef.current.add(pageNum);
+    
+    try {
+      const page = await pdfDoc.getPage(pageNum);
+      const viewport = page.getViewport({ scale });
+      
+      const context = canvas.getContext('2d');
+      if (!context) return;
+
+      canvas.height = viewport.height;
+      canvas.width = viewport.width;
+
+      await page.render({
+        canvasContext: context,
+        viewport: viewport,
+      }).promise;
+      
+      setRenderedPages(prev => new Set(prev).add(pageNum));
+    } catch (err) {
+      console.error('Failed to render page:', pageNum, err);
+    } finally {
+      renderingRef.current.delete(pageNum);
+    }
+  }, [pdfDoc, scale]);
+
+  // 检查可见页面并渲染
+  const checkAndRenderVisiblePages = useCallback(() => {
+    if (!containerRef.current || !pdfDoc) return;
+    
+    const container = containerRef.current;
+    const containerRect = container.getBoundingClientRect();
+    
+    canvasRefs.current.forEach((canvas, pageNum) => {
+      const wrapper = canvas.parentElement;
+      if (!wrapper) return;
+      
+      const rect = wrapper.getBoundingClientRect();
+      const isVisible = (
+        rect.bottom >= containerRect.top - 100 &&
+        rect.top <= containerRect.bottom + 100
+      );
+      
+      if (isVisible && !renderedPages.has(pageNum)) {
+        renderPage(pageNum);
+      }
+    });
+  }, [pdfDoc, renderedPages, renderPage]);
+
+  // PDF 加载完成后渲染初始可见页面
+  useEffect(() => {
+    if (!pdfDoc || totalPages === 0) return;
+    
+    // 延迟执行以确保 canvas 已挂载
+    const timer = setTimeout(() => {
+      checkAndRenderVisiblePages();
+    }, 100);
+    
+    return () => clearTimeout(timer);
+  }, [pdfDoc, totalPages, checkAndRenderVisiblePages]);
+
+  // 缩放变化时重新渲染
   useEffect(() => {
     if (!pdfDoc) return;
-    
     setRenderedPages(new Set());
+    renderingRef.current.clear();
     
-    const renderAllPages = async () => {
-      for (let i = 1; i <= totalPages; i++) {
-        const canvas = canvasRefs.current.get(i);
-        if (!canvas) continue;
-        
-        try {
-          const page = await pdfDoc.getPage(i);
-          const viewport = page.getViewport({ scale });
-          
-          const context = canvas.getContext('2d');
-          if (!context) continue;
-
-          canvas.height = viewport.height;
-          canvas.width = viewport.width;
-
-          await page.render({
-            canvasContext: context,
-            viewport: viewport,
-          }).promise;
-          
-          setRenderedPages(prev => new Set(prev).add(i));
-        } catch (err) {
-          console.error('Failed to render page:', i, err);
-        }
-      }
-    };
+    const timer = setTimeout(() => {
+      checkAndRenderVisiblePages();
+    }, 100);
     
-    // Small delay to ensure canvas refs are set
-    const timer = setTimeout(renderAllPages, 100);
     return () => clearTimeout(timer);
-  }, [pdfDoc, scale, totalPages]);
+  }, [scale]);
+
+  // 滚动时检查并渲染可见页面
+  const handleScroll = useCallback(() => {
+    checkAndRenderVisiblePages();
+  }, [checkAndRenderVisiblePages]);
 
   // Set canvas ref
   const setCanvasRef = useCallback((pageNum: number, el: HTMLCanvasElement | null) => {
@@ -146,8 +196,8 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
           <Button
             size="small"
             icon={<ZoomOutOutlined />}
-            onClick={() => setScale((s) => Math.max(0.5, s - 0.2))}
-            disabled={scale <= 0.5}
+            onClick={() => setScale((s) => Math.max(0.3, s - 0.2))}
+            disabled={scale <= 0.3}
           />
           <span style={{ color: colors.textSecondary, fontSize: 12, minWidth: 50, textAlign: 'center' }}>
             {Math.round(scale * 100)}%
@@ -155,8 +205,8 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
           <Button
             size="small"
             icon={<ZoomInOutlined />}
-            onClick={() => setScale((s) => Math.min(3, s + 0.2))}
-            disabled={scale >= 3}
+            onClick={() => setScale((s) => Math.min(2, s + 0.2))}
+            disabled={scale >= 2}
           />
         </Space>
       </div>
@@ -164,6 +214,7 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
       {/* Scrollable pages container */}
       <div
         ref={containerRef}
+        onScroll={handleScroll}
         style={{
           background: colors.bgSecondary,
           borderRadius: 8,
@@ -184,6 +235,8 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
               background: '#fff',
               boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
               borderRadius: 4,
+              minHeight: 200,
+              minWidth: 150,
             }}
           >
             {/* Page number indicator */}

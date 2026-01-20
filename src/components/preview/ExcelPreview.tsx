@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Table, Spin, Alert, Tabs } from 'antd';
 import * as XLSX from 'xlsx';
 import { readFile } from '@tauri-apps/plugin-fs';
+import { useThemeColors } from '../../hooks';
 
 interface ExcelPreviewProps {
   filePath: string;
@@ -17,20 +18,30 @@ export const ExcelPreview: React.FC<ExcelPreviewProps> = ({ filePath }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sheets, setSheets] = useState<SheetData[]>([]);
+  const abortRef = useRef(false);
+  const colors = useThemeColors();
 
   useEffect(() => {
+    abortRef.current = false;
+    
     const loadExcel = async () => {
       setLoading(true);
       setError(null);
+      setSheets([]);
 
       try {
         // Read file as binary
         const data = await readFile(filePath);
+        
+        if (abortRef.current) return;
+        
         const workbook = XLSX.read(data, { type: 'array' });
 
         const sheetsData: SheetData[] = [];
 
         for (const sheetName of workbook.SheetNames) {
+          if (abortRef.current) return;
+          
           const worksheet = workbook.Sheets[sheetName];
           const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
 
@@ -54,16 +65,25 @@ export const ExcelPreview: React.FC<ExcelPreviewProps> = ({ filePath }) => {
           sheetsData.push({ name: sheetName, headers, rows });
         }
 
-        setSheets(sheetsData);
+        if (!abortRef.current) {
+          setSheets(sheetsData);
+        }
       } catch (err) {
+        if (abortRef.current) return;
         console.error('Failed to load Excel:', err);
         setError('无法加载 Excel 文件');
       } finally {
-        setLoading(false);
+        if (!abortRef.current) {
+          setLoading(false);
+        }
       }
     };
 
     loadExcel();
+    
+    return () => {
+      abortRef.current = true;
+    };
   }, [filePath]);
 
   if (loading) {
@@ -104,14 +124,17 @@ export const ExcelPreview: React.FC<ExcelPreviewProps> = ({ filePath }) => {
         dataSource={sheet.rows}
         size="small"
         scroll={{ x: 'max-content', y: 350 }}
+        virtual
         pagination={{
-          pageSize: 50,
-          showSizeChanger: false,
+          pageSize: 100,
+          showSizeChanger: true,
+          pageSizeOptions: ['50', '100', '200'],
           showQuickJumper: true,
           size: 'small',
+          showTotal: (total) => `共 ${total} 行`,
         }}
         style={{ 
-          background: '#1a1a2e',
+          background: colors.bgSecondary,
           borderRadius: 8,
         }}
       />

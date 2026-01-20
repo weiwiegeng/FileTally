@@ -22,7 +22,12 @@ body {
   color: #ffffff;
 }
 
-/* Custom scrollbar */
+[data-theme='light'] body {
+  background: #ffffff;
+  color: #000000;
+}
+
+/* Custom scrollbar - Dark theme (default) */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -42,25 +47,26 @@ body {
   background: #404060;
 }
 
-/* Ant Design overrides for dark theme */
-.ant-menu-dark .ant-menu-item-selected {
-  background: rgba(24, 144, 255, 0.2) !important;
+/* Light theme scrollbar */
+[data-theme='light'] ::-webkit-scrollbar-track {
+  background: #f0f0f0;
 }
 
-.ant-menu-dark .ant-menu-item:hover {
-  background: rgba(255, 255, 255, 0.05) !important;
+[data-theme='light'] ::-webkit-scrollbar-thumb {
+  background: #c0c0c0;
 }
 
-.ant-card-hoverable:hover {
-  border-color: #1890ff !important;
+[data-theme='light'] ::-webkit-scrollbar-thumb:hover {
+  background: #a0a0a0;
 }
 
+/* Ant Design overrides */
 .ant-descriptions-item-label {
-  color: #8c8c8c !important;
+  color: inherit;
 }
 
 .ant-descriptions-item-content {
-  color: #fff !important;
+  color: inherit;
 }
 
 /* Animation */
