@@ -2,6 +2,7 @@ import React from 'react';
 import { Typography, Descriptions, Empty, Spin, Tag } from 'antd';
 import { FileIcon } from './FileIcon';
 import { useFileStore } from '../../stores';
+import { useThemeColors } from '../../hooks';
 import {
   PdfPreview,
   ExcelPreview,
@@ -40,6 +41,7 @@ const getPreviewType = (extension: string): string => {
 
 export const FilePreview: React.FC = () => {
   const { selectedFile, previewInfo, previewLoading } = useFileStore();
+  const colors = useThemeColors();
 
   if (!selectedFile) {
     return (
@@ -49,7 +51,7 @@ export const FilePreview: React.FC = () => {
           alignItems: 'center',
           justifyContent: 'center',
           height: '100%',
-          color: '#8c8c8c',
+          color: colors.textSecondary,
         }}
       >
         <Empty
@@ -82,14 +84,14 @@ export const FilePreview: React.FC = () => {
       return (
         <div
           style={{
-            background: '#1a1a2e',
+            background: colors.bgSecondary,
             borderRadius: 8,
             padding: 20,
             textAlign: 'center',
           }}
         >
           <FileIcon isDir={true} extension="" size={48} isOpen={true} />
-          <div style={{ marginTop: 16, color: '#fff' }}>文件夹</div>
+          <div style={{ marginTop: 16, color: colors.textPrimary }}>文件夹</div>
           {selectedFile.children_count !== null && (
             <Text type="secondary">
               包含 {selectedFile.children_count} 个项目
@@ -136,7 +138,7 @@ export const FilePreview: React.FC = () => {
         return (
           <div
             style={{
-              background: '#1a1a2e',
+              background: colors.bgSecondary,
               borderRadius: 8,
               padding: 40,
               textAlign: 'center',
@@ -147,10 +149,10 @@ export const FilePreview: React.FC = () => {
               extension={selectedFile.extension}
               size={64}
             />
-            <div style={{ marginTop: 20, color: '#8c8c8c' }}>
+            <div style={{ marginTop: 20, color: colors.textSecondary }}>
               不支持预览此文件格式
             </div>
-            <div style={{ marginTop: 8, color: '#6c6c8a', fontSize: 12 }}>
+            <div style={{ marginTop: 8, color: colors.textSecondary, fontSize: 12 }}>
               {selectedFile.extension.toUpperCase() || '未知'} 格式
             </div>
           </div>
@@ -178,7 +180,7 @@ export const FilePreview: React.FC = () => {
           <Text
             strong
             style={{
-              color: '#fff',
+              color: colors.textPrimary,
               fontSize: 16,
               display: 'block',
               overflow: 'hidden',
@@ -212,23 +214,29 @@ export const FilePreview: React.FC = () => {
           column={1}
           size="small"
           style={{ marginTop: 20 }}
-          labelStyle={{ color: '#8c8c8c' }}
-          contentStyle={{ color: '#fff' }}
         >
-          <Descriptions.Item label="大小">
-            {previewInfo.metadata.size_formatted}
+          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>大小</Text>}>
+            <Text style={{ color: colors.textPrimary }}>
+              {previewInfo.metadata.size_formatted || '-'}
+            </Text>
           </Descriptions.Item>
-          <Descriptions.Item label="类型">
+          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>类型</Text>}>
             <Tag color="blue">{previewInfo.metadata.extension || '未知'}</Tag>
           </Descriptions.Item>
-          <Descriptions.Item label="MIME 类型">
-            {previewInfo.metadata.mime_type}
+          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>MIME 类型</Text>}>
+            <Text style={{ color: colors.textPrimary }}>
+              {previewInfo.metadata.mime_type || '-'}
+            </Text>
           </Descriptions.Item>
-          <Descriptions.Item label="修改时间">
-            {previewInfo.metadata.modified_time}
+          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>修改时间</Text>}>
+            <Text style={{ color: colors.textPrimary }}>
+              {previewInfo.metadata.modified_time || '-'}
+            </Text>
           </Descriptions.Item>
-          <Descriptions.Item label="创建时间">
-            {previewInfo.metadata.created_time}
+          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>创建时间</Text>}>
+            <Text style={{ color: colors.textPrimary }}>
+              {previewInfo.metadata.created_time || '-'}
+            </Text>
           </Descriptions.Item>
         </Descriptions>
       )}

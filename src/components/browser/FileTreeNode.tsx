@@ -3,6 +3,7 @@ import { RightOutlined, DownOutlined, LoadingOutlined } from '@ant-design/icons'
 import { FileNode } from '../../types';
 import { FileIcon } from './FileIcon';
 import { useFileStore } from '../../stores';
+import { useThemeColors } from '../../hooks';
 import { formatSize, formatDate } from '../../utils';
 
 interface FileTreeNodeProps {
@@ -23,6 +24,7 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
     selectFile,
     selectedFile,
   } = useFileStore();
+  const colors = useThemeColors();
 
   const isExpanded = expandedIds.has(node.id);
   const isSelected = selectedFile?.id === node.id;
@@ -71,7 +73,7 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
         }}
         onMouseEnter={(e) => {
           if (!isSelected) {
-            e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+            e.currentTarget.style.background = colors.bgHover;
           }
         }}
         onMouseLeave={(e) => {
@@ -97,9 +99,9 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
             isLoading ? (
               <LoadingOutlined style={{ fontSize: 10, color: '#1890ff' }} />
             ) : isExpanded ? (
-              <DownOutlined style={{ fontSize: 10, color: '#8c8c8c' }} />
+              <DownOutlined style={{ fontSize: 10, color: colors.textSecondary }} />
             ) : (
-              <RightOutlined style={{ fontSize: 10, color: '#8c8c8c' }} />
+              <RightOutlined style={{ fontSize: 10, color: colors.textSecondary }} />
             )
           )}
         </span>
@@ -120,7 +122,7 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
-            color: node.is_hidden ? '#8c8c8c' : '#fff',
+            color: node.is_hidden ? colors.textSecondary : colors.textPrimary,
             fontSize: 13,
           }}
         >
@@ -131,7 +133,7 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
         <span
           style={{
             fontSize: 11,
-            color: '#8c8c8c',
+            color: colors.textSecondary,
             marginLeft: 8,
           }}
         >
