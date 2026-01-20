@@ -5,3 +5,4 @@ export * from './remoteStore';
 export * from './settingsStore';
 export * from './analysisStore';
 export * from './transferStore';
+export * from './checkConfigStore';

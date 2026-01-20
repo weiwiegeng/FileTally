@@ -32,6 +32,7 @@ import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { useAnalysisStore, useRemoteStore, FolderAnalysisResult } from '../../stores';
 import { useThemeColors } from '../../hooks';
 import { RemoteFolderSelector } from '../search/RemoteFolderSelector';
+import { isRemotePath, getPathName } from '../../utils/format';
 
 const { Text, Title } = Typography;
 
@@ -249,7 +250,7 @@ export const FolderAnalysisTab: React.FC = () => {
           <Button size="large">
             <Space>
               {folderAnalysisPath ? (
-                folderAnalysisPath.startsWith('/Volumes/') ? (
+                isRemotePath(folderAnalysisPath) ? (
                   <CloudServerOutlined style={{ color: colors.accentPurple }} />
                 ) : (
                   <FolderOpenOutlined style={{ color: colors.accentOrange }} />
@@ -259,7 +260,7 @@ export const FolderAnalysisTab: React.FC = () => {
               )}
               {folderAnalysisPath ? (
                 <Text ellipsis style={{ maxWidth: 200 }}>
-                  {folderAnalysisPath.split('/').pop()}
+                  {getPathName(folderAnalysisPath)}
                 </Text>
               ) : (
                 '选择文件夹'

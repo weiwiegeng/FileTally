@@ -30,6 +30,7 @@ import * as XLSX from 'xlsx';
 import { useSearchStore, useSettingsStore, useRemoteStore, SearchMode } from '../../stores';
 import { useThemeColors } from '../../hooks';
 import { RemoteFolderSelector } from './RemoteFolderSelector';
+import { isRemotePath, getPathName } from '../../utils/format';
 
 const { Text } = Typography;
 
@@ -66,7 +67,7 @@ export const SearchPanel: React.FC = () => {
   const { connections } = useRemoteStore();
   const colors = useThemeColors();
 
-  const [showOptions, setShowOptions] = useState(false);
+  const [showOptions, setShowOptions] = useState(true);
   const [selectedFileTypes, setSelectedFileTypes] = useState<string>('');
   const [showRemoteSelector, setShowRemoteSelector] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -228,7 +229,7 @@ export const SearchPanel: React.FC = () => {
               <Space>
                 {searchPath ? (
                   <>
-                    {searchPath.startsWith('/Volumes/') ? (
+                    {isRemotePath(searchPath) ? (
                       <CloudServerOutlined style={{ color: colors.accentPurple }} />
                     ) : (
                       <FolderOpenOutlined style={{ color: colors.accentOrange }} />
@@ -237,7 +238,7 @@ export const SearchPanel: React.FC = () => {
                       ellipsis
                       style={{ maxWidth: 100, color: colors.accentBlue }}
                     >
-                      {searchPath.split('/').pop()}
+                      {getPathName(searchPath)}
                     </Text>
                   </>
                 ) : (

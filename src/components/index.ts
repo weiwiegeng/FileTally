@@ -5,3 +5,4 @@ export * from './preview';
 export * from './search';
 export * from './remote';
 export * from './settings';
+export * from './excel';

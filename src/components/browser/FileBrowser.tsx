@@ -14,6 +14,7 @@ import { FileTree } from './FileTree';
 import { FilePreview } from './FilePreview';
 import { useThemeColors } from '../../hooks';
 import { RemoteFolderSelector } from '../search/RemoteFolderSelector';
+import { splitPath, isRemotePath } from '../../utils/format';
 
 const { Title, Text } = Typography;
 
@@ -38,8 +39,8 @@ export const FileBrowser: React.FC = () => {
     }
   }, []);
 
-  // Parse path for breadcrumb
-  const pathParts = currentPath?.split('/').filter(Boolean) || [];
+  // Parse path for breadcrumb (cross-platform)
+  const pathParts = splitPath(currentPath || '');
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -122,7 +123,7 @@ export const FileBrowser: React.FC = () => {
             <Button type="primary">
               <Space>
                 {currentPath ? (
-                  currentPath.startsWith('/Volumes/') ? (
+                  isRemotePath(currentPath) ? (
                     <CloudServerOutlined />
                   ) : (
                     <FolderOpenOutlined />
@@ -148,7 +149,7 @@ export const FileBrowser: React.FC = () => {
           }}
         >
           <Space>
-            {currentPath.startsWith('/Volumes/') ? (
+            {isRemotePath(currentPath) ? (
               <CloudServerOutlined style={{ color: colors.accentPurple }} />
             ) : (
               <HomeOutlined style={{ color: colors.textSecondary }} />

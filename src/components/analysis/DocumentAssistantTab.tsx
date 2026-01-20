@@ -28,6 +28,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useSettingsStore } from '../../stores';
 import { useThemeColors } from '../../hooks';
 import { getAIService, ChatMessage } from '../../services/aiService';
+import { getPathName } from '../../utils/format';
 
 const { Text, Title, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -84,7 +85,7 @@ export const DocumentAssistantTab: React.FC = () => {
             path: selected,
           });
           
-          const fileName = (selected as string).split('/').pop() || '';
+          const fileName = getPathName(selected as string);
           
           setSelectedDocument({
             path: selected as string,

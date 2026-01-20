@@ -8,6 +8,7 @@ import {
   RobotOutlined,
   SettingOutlined,
   UploadOutlined,
+  FileExcelOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { DiskOverview } from '../disk';
@@ -17,12 +18,13 @@ import { RemoteConnect } from '../remote';
 import { Settings } from '../settings';
 import { AIAnalysis } from '../analysis';
 import { FileTransfer } from '../transfer';
+import { ExcelCheck } from '../excel';
 import { useSettingsStore } from '../../stores';
 
 const { Sider, Content, Header } = Layout;
 const { Title } = Typography;
 
-type MenuKey = 'disk' | 'browser' | 'remote' | 'filter' | 'transfer' | 'ai' | 'settings';
+type MenuKey = 'disk' | 'browser' | 'remote' | 'filter' | 'transfer' | 'excel' | 'ai' | 'settings';
 
 export const MainLayout: React.FC = () => {
   const { settings } = useSettingsStore();
@@ -71,6 +73,11 @@ export const MainLayout: React.FC = () => {
       label: t('menu.fileTransfer'),
     },
     {
+      key: 'excel',
+      icon: <FileExcelOutlined />,
+      label: t('menu.excelCheck'),
+    },
+    {
       key: 'ai',
       icon: <RobotOutlined />,
       label: t('menu.aiAnalysis'),
@@ -97,6 +104,8 @@ export const MainLayout: React.FC = () => {
         return <FileSearch />;
       case 'transfer':
         return <FileTransfer />;
+      case 'excel':
+        return <ExcelCheck />;
       case 'ai':
         return <AIAnalysis />;
       case 'settings':

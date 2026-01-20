@@ -41,6 +41,7 @@ import { useTransferStore, useRemoteStore, TransferItem, TransferDirection } fro
 import { useThemeColors } from '../../hooks';
 import { RemoteFolderSelector } from '../search/RemoteFolderSelector';
 import { ConflictModal } from './ConflictModal';
+import { getPathName } from '../../utils/format';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -156,7 +157,7 @@ export const FileTransfer: React.FC = () => {
           }]);
         } catch {
           // 如果获取信息失败，使用默认值
-          const name = (selected as string).split('/').pop() || selected;
+          const name = getPathName(selected as string) || selected;
           addSourceItems([{
             id: '',
             sourcePath: selected as string,

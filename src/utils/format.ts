@@ -58,3 +58,81 @@ export function getFileCategory(extension: string): string {
   }
   return 'other';
 }
+
+/**
+ * Cross-platform path utilities
+ */
+
+/**
+ * Detect if current platform is Windows based on path format
+ */
+export function isWindowsPath(path: string): boolean {
+  // Windows paths: C:\, D:\, \\server\share, etc.
+  return /^[A-Za-z]:\\|^\\\\/.test(path);
+}
+
+/**
+ * Get path separator based on path format
+ */
+export function getPathSeparator(path: string): string {
+  return isWindowsPath(path) ? '\\' : '/';
+}
+
+/**
+ * Split path into parts (cross-platform)
+ */
+export function splitPath(path: string): string[] {
+  if (!path) return [];
+  // Normalize to forward slashes, then split
+  return path.replace(/\\/g, '/').split('/').filter(Boolean);
+}
+
+/**
+ * Get file/folder name from path (cross-platform)
+ */
+export function getPathName(path: string): string {
+  if (!path) return '';
+  const parts = splitPath(path);
+  return parts[parts.length - 1] || '';
+}
+
+/**
+ * Check if path is a remote/network path
+ * - macOS: /Volumes/xxx
+ * - Windows: \\server\share or mapped drive like Z:\
+ */
+export function isRemotePath(path: string): boolean {
+  if (!path) return false;
+  // macOS mounted volumes
+  if (path.startsWith('/Volumes/')) return true;
+  // Windows UNC paths
+  if (path.startsWith('\\\\')) return true;
+  // Could add more heuristics for Windows mapped drives
+  return false;
+}
+
+/**
+ * Get the mount point or root from a path
+ * - macOS: /Volumes/ShareName -> /Volumes/ShareName
+ * - Windows: \\server\share -> \\server\share, C:\ -> C:\
+ */
+export function getMountPoint(path: string): string {
+  if (!path) return '';
+  
+  // macOS /Volumes/xxx
+  const volumeMatch = path.match(/^\/Volumes\/[^\/]+/);
+  if (volumeMatch) return volumeMatch[0];
+  
+  // Windows UNC \\server\share
+  const uncMatch = path.match(/^\\\\[^\\]+\\[^\\]+/);
+  if (uncMatch) return uncMatch[0];
+  
+  // Windows drive C:\
+  const driveMatch = path.match(/^[A-Za-z]:\\/);
+  if (driveMatch) return driveMatch[0];
+  
+  // Unix root
+  if (path.startsWith('/')) return '/';
+  
+  return '';
+}
