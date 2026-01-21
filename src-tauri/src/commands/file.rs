@@ -14,6 +14,60 @@ fn generate_id(path: &Path) -> String {
     format!("{:x}", hasher.finish())
 }
 
+/// 自然排序比较函数，支持数字按数值排序
+/// 例如: "file1" < "file2" < "file10" (而不是 "file1" < "file10" < "file2")
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut i = 0;
+    let mut j = 0;
+    
+    while i < a_chars.len() && j < b_chars.len() {
+        let a_is_digit = a_chars[i].is_ascii_digit();
+        let b_is_digit = b_chars[j].is_ascii_digit();
+        
+        match (a_is_digit, b_is_digit) {
+            (true, true) => {
+                // 提取数字
+                let mut a_num = 0u64;
+                while i < a_chars.len() && a_chars[i].is_ascii_digit() {
+                    a_num = a_num * 10 + a_chars[i].to_digit(10).unwrap() as u64;
+                    i += 1;
+                }
+                let mut b_num = 0u64;
+                while j < b_chars.len() && b_chars[j].is_ascii_digit() {
+                    b_num = b_num * 10 + b_chars[j].to_digit(10).unwrap() as u64;
+                    j += 1;
+                }
+                match a_num.cmp(&b_num) {
+                    Ordering::Equal => continue,
+                    other => return other,
+                }
+            }
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            (false, false) => {
+                // 比较字符（忽略大小写）
+                let a_lower = a_chars[i].to_lowercase().next().unwrap_or(a_chars[i]);
+                let b_lower = b_chars[j].to_lowercase().next().unwrap_or(b_chars[j]);
+                match a_lower.cmp(&b_lower) {
+                    Ordering::Equal => {
+                        i += 1;
+                        j += 1;
+                        continue;
+                    }
+                    other => return other,
+                }
+            }
+        }
+    }
+    
+    // 比较剩余长度
+    a_chars.len().cmp(&b_chars.len())
+}
+
 /// Format file size for display
 fn format_size(size: u64) -> String {
     const KB: u64 = 1024;
@@ -166,12 +220,12 @@ pub fn scan_directory(path: String) -> Result<Vec<FileNode>, String> {
         nodes.push(node);
     }
     
-    // Sort: directories first, then by name
+    // Sort: directories first, then by name (natural sort)
     nodes.sort_by(|a, b| {
         match (a.is_dir, b.is_dir) {
             (true, false) => std::cmp::Ordering::Less,
             (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            _ => natural_cmp(&a.name, &b.name),
         }
     });
     

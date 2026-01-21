@@ -98,6 +98,31 @@ interface BatchIntegrityResult {
   outputPath: string | null;
 }
 
+// 基于 Excel 的完整性检查结果
+interface TemplateCheckResult {
+  template: string;
+  expectedName: string;
+  exists: boolean;
+}
+
+interface ExcelIntegrityItem {
+  rowIndex: number;
+  name: string;
+  folderFound: boolean;
+  folderPath: string | null;
+  isComplete: boolean;
+  checkResults: TemplateCheckResult[];
+}
+
+interface ExcelIntegrityResult {
+  totalRows: number;
+  completeCount: number;
+  incompleteCount: number;
+  notFoundCount: number;
+  items: ExcelIntegrityItem[];
+  outputPath: string | null;
+}
+
 // 文件树节点
 interface FileTreeNode {
   name: string;
@@ -143,6 +168,15 @@ export const ExcelCheck: React.FC = () => {
   const [namePattern, setNamePattern] = useState<string>('auto');
   const [integrityResult, setIntegrityResult] = useState<BatchIntegrityResult | null>(null);
   const [checking, setChecking] = useState(false);
+  
+  // 基于 Excel 的完整性检查状态
+  const [integritySource, setIntegritySource] = useState<'folder' | 'excel'>('excel');
+  const [integrityExcelPath, setIntegrityExcelPath] = useState<string>('');
+  const [integrityExcelInfo, setIntegrityExcelInfo] = useState<ExcelFileInfo | null>(null);
+  const [integritySheet, setIntegritySheet] = useState<number>(0);
+  const [integrityNameColumn, setIntegrityNameColumn] = useState<number | null>(null);
+  const [integrityFolderMatchMode, setIntegrityFolderMatchMode] = useState<string>('contains');
+  const [excelIntegrityResult, setExcelIntegrityResult] = useState<ExcelIntegrityResult | null>(null);
 
   // 远程选择器状态
   const [remoteSelectorVisible, setRemoteSelectorVisible] = useState(false);
@@ -436,6 +470,91 @@ export const ExcelCheck: React.FC = () => {
     }
   };
 
+  // 选择完整性检查用的 Excel 文件
+  const handleSelectIntegrityExcel = async () => {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: 'Excel', extensions: ['xlsx', 'xls'] }],
+      });
+
+      if (selected) {
+        setIntegrityExcelPath(selected as string);
+        setIntegrityExcelInfo(null);
+        setExcelIntegrityResult(null);
+
+        // 读取 Excel 信息
+        const info = await invoke<ExcelFileInfo>('read_excel_info', {
+          filePath: selected,
+          sheetIndex: 0,
+        });
+
+        setIntegrityExcelInfo(info);
+        setIntegritySheet(0);
+        setIntegrityNameColumn(null);
+      }
+    } catch (error) {
+      message.error(`打开文件失败: ${error}`);
+    }
+  };
+
+  // 切换完整性检查的工作表
+  const handleIntegritySheetChange = async (sheetIndex: number) => {
+    if (!integrityExcelPath) return;
+
+    try {
+      const info = await invoke<ExcelFileInfo>('read_excel_info', {
+        filePath: integrityExcelPath,
+        sheetIndex,
+      });
+
+      setIntegrityExcelInfo(info);
+      setIntegritySheet(sheetIndex);
+      setIntegrityNameColumn(null);
+    } catch (error) {
+      message.error(`读取工作表失败: ${error}`);
+    }
+  };
+
+  // 执行基于 Excel 的完整性检查
+  const handleExcelIntegrityCheck = async () => {
+    if (!integrityExcelPath || integrityNameColumn === null || !integrityFolder || templates.length === 0) {
+      message.warning('请先选择 Excel 文件、姓名列、目标文件夹和检查模板');
+      return;
+    }
+
+    setChecking(true);
+    try {
+      // 获取保存路径（默认保存到原文件同目录）
+      const outputPath = await save({
+        defaultPath: integrityExcelPath.replace(/\.xlsx?$/i, '_检查结果.xlsx'),
+        filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+      });
+
+      const result = await invoke<ExcelIntegrityResult>('check_integrity_with_excel', {
+        excelPath: integrityExcelPath,
+        sheetIndex: integritySheet,
+        nameColumnIndex: integrityNameColumn,
+        targetFolder: integrityFolder,
+        templates,
+        folderMatchMode: integrityFolderMatchMode,
+        outputPath,
+      });
+
+      setExcelIntegrityResult(result);
+
+      if (result.outputPath) {
+        message.success(`检查完成，结果已标注到: ${result.outputPath}`);
+      } else {
+        message.success('检查完成');
+      }
+    } catch (error) {
+      message.error(`检查失败: ${error}`);
+    } finally {
+      setChecking(false);
+    }
+  };
+
   // 匹配结果表格列
   const matchColumns = [
     {
@@ -709,65 +828,90 @@ export const ExcelCheck: React.FC = () => {
   // Tab 2: 完整性检查
   const renderIntegrityTab = () => (
     <Space direction="vertical" style={{ width: '100%' }} size="large">
-      {/* 配置管理 */}
-      <Card size="small" title={<><SettingOutlined /> 检查配置</>}>
-        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-          <Space>
-            <Select
-              placeholder="选择已保存的配置"
-              style={{ width: 250 }}
-              value={selectedConfigId}
-              onChange={handleLoadConfig}
-              allowClear
-              onClear={() => selectConfig(null)}
-            >
-              {configs.map((config) => (
-                <Select.Option key={config.id} value={config.id}>
-                  {config.name}
-                </Select.Option>
-              ))}
-            </Select>
-            {selectedConfigId && (
-              <Popconfirm
-                title="确定删除这个配置吗？"
-                onConfirm={() => handleDeleteConfig(selectedConfigId)}
-                okText="删除"
-                cancelText="取消"
-              >
-                <Button icon={<DeleteOutlined />} danger size="small">
-                  删除
+      {/* 名单来源选择 */}
+      <Card size="small" title="1. 选择检查名单来源">
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Radio.Group 
+            value={integritySource} 
+            onChange={(e) => setIntegritySource(e.target.value)}
+            buttonStyle="solid"
+          >
+            <Radio.Button value="excel">
+              <FileExcelOutlined /> 从 Excel 导入名单
+            </Radio.Button>
+            <Radio.Button value="folder">
+              <FolderOpenOutlined /> 从文件夹扫描
+            </Radio.Button>
+          </Radio.Group>
+  
+          {integritySource === 'excel' ? (
+            <>
+              <Space>
+                <Button icon={<FileExcelOutlined />} onClick={handleSelectIntegrityExcel}>
+                  选择 Excel 文件
                 </Button>
-              </Popconfirm>
-            )}
-          </Space>
-          <Space>
-            <Button
-              icon={<SaveOutlined />}
-              onClick={() => openSaveConfigModal(false)}
-              disabled={!integrityFolder && templates.length === 0}
-            >
-              保存为新配置
-            </Button>
-            {selectedConfigId && (
-              <Button
-                icon={<SaveOutlined />}
-                onClick={() => openSaveConfigModal(true)}
-                type="primary"
-              >
-                更新当前配置
-              </Button>
-            )}
-          </Space>
+                {integrityExcelPath && <Text type="secondary">{integrityExcelPath}</Text>}
+              </Space>
+  
+              {integrityExcelInfo && (
+                <>
+                  <Space>
+                    <Text>工作表:</Text>
+                    <Select
+                      value={integritySheet}
+                      onChange={handleIntegritySheetChange}
+                      style={{ width: 200 }}
+                    >
+                      {integrityExcelInfo.sheets.map((sheet, idx) => (
+                        <Select.Option key={idx} value={idx}>
+                          {sheet}
+                        </Select.Option>
+                      ))}
+                    </Select>
+                    <Text type="secondary">共 {integrityExcelInfo.rowCount} 行数据</Text>
+                  </Space>
+  
+                  <Space>
+                    <Text>姓名列:</Text>
+                    <Select
+                      value={integrityNameColumn}
+                      onChange={setIntegrityNameColumn}
+                      style={{ width: 300 }}
+                      placeholder="选择包含姓名的列"
+                    >
+                      {integrityExcelInfo.columns.map((col) => (
+                        <Select.Option key={col.index} value={col.index}>
+                          {col.letter}列 - {col.name}
+                          {col.sampleValues.length > 0 && (
+                            <Text type="secondary"> (如: {col.sampleValues[0]})</Text>
+                          )}
+                        </Select.Option>
+                      ))}
+                    </Select>
+                  </Space>
+  
+                  <Space>
+                    <Text>文件夹匹配方式:</Text>
+                    <Radio.Group value={integrityFolderMatchMode} onChange={(e) => setIntegrityFolderMatchMode(e.target.value)}>
+                      <Radio.Button value="contains">包含匹配</Radio.Button>
+                      <Radio.Button value="exact">精确匹配</Radio.Button>
+                      <Radio.Button value="starts_with">前缀匹配</Radio.Button>
+                    </Radio.Group>
+                  </Space>
+                </>
+              )}
+            </>
+          ) : (
+            <Alert
+              type="info"
+              message="扫描模式将自动遍历目标文件夹下的所有子文件夹，并从文件夹名提取姓名进行检查"
+            />
+          )}
         </Space>
-        {configs.length === 0 && (
-          <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
-            还没有保存的配置，配置好后点击"保存为新配置"可以保存便于下次快速检查
-          </Text>
-        )}
       </Card>
-
+  
       {/* 目标文件夹选择 */}
-      <Card size="small" title="1. 选择要检查的文件夹（检查所有子文件夹）">
+      <Card size="small" title="2. 选择要检查的文件夹（检查所有子文件夹）">
         <Space direction="vertical" style={{ width: '100%' }}>
           <Space>
             <Button icon={<FolderOpenOutlined />} onClick={() => handleSelectFolder('integrity')}>
@@ -782,7 +926,7 @@ export const ExcelCheck: React.FC = () => {
               </Tag>
             )}
           </Space>
-
+  
           {/* 文件树预览 */}
           {integrityFolder && !integrityIsRemote && (
             <div style={{ marginTop: 8 }}>
@@ -813,16 +957,16 @@ export const ExcelCheck: React.FC = () => {
           )}
         </Space>
       </Card>
-
+  
       {/* 必需文件模板 */}
-      <Card size="small" title="2. 配置必需文件模板">
+      <Card size="small" title="3. 配置必需文件模板">
         <Space direction="vertical" style={{ width: '100%' }}>
           <Alert
             type="info"
             message="使用 {name} 作为姓名占位符，如：{name}.docx 会被替换为 张三.docx。每行一个模板。"
             style={{ marginBottom: 8 }}
           />
-
+  
           <TextArea
             placeholder="每行输入一个模板，例如：\n{name}.docx\n{name}照片\n{name}身份证.jpg"
             value={templates.join('\n')}
@@ -830,45 +974,130 @@ export const ExcelCheck: React.FC = () => {
               const lines = e.target.value.split('\n').filter(line => line.trim());
               setTemplates(lines);
             }}
-            rows={6}
+            rows={4}
             style={{ width: '100%', fontFamily: 'monospace' }}
           />
-
+  
           <Text type="secondary">当前模板数量：{templates.length} 个</Text>
         </Space>
       </Card>
-
-      {/* 姓名提取规则 */}
-      <Card size="small" title="3. 姓名提取规则">
-        <Space>
-          <Text>从文件夹名提取姓名:</Text>
-          <Radio.Group value={namePattern} onChange={(e) => setNamePattern(e.target.value)}>
-            <Radio.Button value="auto">自动提取中文</Radio.Button>
-            <Radio.Button value="">使用完整名称</Radio.Button>
-          </Radio.Group>
-        </Space>
-        <div style={{ marginTop: 8 }}>
-          <Text type="secondary">
-            自动提取示例: "2025-0001王宏琳" → "王宏琳"
-          </Text>
-        </div>
-      </Card>
-
+  
+      {/* 姓名提取规则 - 仅扫描模式显示 */}
+      {integritySource === 'folder' && (
+        <Card size="small" title="4. 姓名提取规则">
+          <Space>
+            <Text>从文件夹名提取姓名:</Text>
+            <Radio.Group value={namePattern} onChange={(e) => setNamePattern(e.target.value)}>
+              <Radio.Button value="auto">自动提取中文</Radio.Button>
+              <Radio.Button value="">使用完整名称</Radio.Button>
+            </Radio.Group>
+          </Space>
+          <div style={{ marginTop: 8 }}>
+            <Text type="secondary">
+              自动提取示例: "2025-0001王宏琳" → "王宏琳"
+            </Text>
+          </div>
+        </Card>
+      )}
+  
       {/* 执行按钮 */}
       <Button
         type="primary"
         size="large"
         icon={<SearchOutlined />}
-        onClick={handleIntegrityCheck}
+        onClick={integritySource === 'excel' ? handleExcelIntegrityCheck : handleIntegrityCheck}
         loading={checking}
-        disabled={!integrityFolder || templates.length === 0}
+        disabled={
+          integritySource === 'excel'
+            ? (!integrityExcelPath || integrityNameColumn === null || !integrityFolder || templates.length === 0)
+            : (!integrityFolder || templates.length === 0)
+        }
         block
       >
-        开始检查并导出报告
+        {integritySource === 'excel' ? '开始检查并标注到 Excel' : '开始检查并导出报告'}
       </Button>
-
-      {/* 检查结果 */}
-      {integrityResult && (
+  
+      {/* 基于 Excel 的检查结果 */}
+      {integritySource === 'excel' && excelIntegrityResult && (
+        <Card size="small" title="检查结果">
+          <Row gutter={16} style={{ marginBottom: 16 }}>
+            <Col span={6}>
+              <Statistic title="总行数" value={excelIntegrityResult.totalRows} />
+            </Col>
+            <Col span={6}>
+              <Statistic
+                title="完整"
+                value={excelIntegrityResult.completeCount}
+                valueStyle={{ color: '#52c41a' }}
+                prefix={<CheckCircleOutlined />}
+              />
+            </Col>
+            <Col span={6}>
+              <Statistic
+                title="缺失文件"
+                value={excelIntegrityResult.incompleteCount}
+                valueStyle={{ color: '#ff4d4f' }}
+                prefix={<CloseCircleOutlined />}
+              />
+            </Col>
+            <Col span={6}>
+              <Statistic
+                title="未找到文件夹"
+                value={excelIntegrityResult.notFoundCount}
+                valueStyle={{ color: '#faad14' }}
+              />
+            </Col>
+          </Row>
+  
+          {excelIntegrityResult.outputPath && (
+            <Alert
+              type="success"
+              message={`检查结果已标注到: ${excelIntegrityResult.outputPath}`}
+              style={{ marginBottom: 16 }}
+            />
+          )}
+  
+          <Table
+            dataSource={excelIntegrityResult.items.filter(item => !item.isComplete)}
+            columns={[
+              { title: '行号', dataIndex: 'rowIndex', key: 'rowIndex', width: 60 },
+              { title: '姓名', dataIndex: 'name', key: 'name', width: 100 },
+              {
+                title: '文件夹',
+                key: 'folder',
+                width: 120,
+                render: (_: unknown, record: ExcelIntegrityItem) => 
+                  record.folderFound ? (
+                    <Tag color="success">已找到</Tag>
+                  ) : (
+                    <Tag color="warning">未找到</Tag>
+                  ),
+              },
+              ...templates.map((template, idx) => ({
+                title: template,
+                key: `template_${idx}`,
+                width: 80,
+                render: (_: unknown, record: ExcelIntegrityItem) => {
+                  const check = record.checkResults[idx];
+                  return check?.exists ? (
+                    <Tag color="success">✓</Tag>
+                  ) : (
+                    <Tag color="error">✗</Tag>
+                  );
+                },
+              })),
+            ]}
+            rowKey="rowIndex"
+            size="small"
+            pagination={{ pageSize: 10 }}
+            title={() => <Text strong>缺失项列表</Text>}
+            rowClassName={(record) => (!record.isComplete ? 'row-missing' : '')}
+          />
+        </Card>
+      )}
+  
+      {/* 扫描模式的检查结果 */}
+      {integritySource === 'folder' && integrityResult && (
         <Card size="small" title="检查结果">
           <Row gutter={16} style={{ marginBottom: 16 }}>
             <Col span={8}>
@@ -891,7 +1120,7 @@ export const ExcelCheck: React.FC = () => {
               />
             </Col>
           </Row>
-
+  
           {integrityResult.outputPath && (
             <Alert
               type="success"
@@ -899,7 +1128,7 @@ export const ExcelCheck: React.FC = () => {
               style={{ marginBottom: 16 }}
             />
           )}
-
+  
           <Table
             dataSource={integrityResult.results}
             columns={integrityColumns}

@@ -377,6 +377,39 @@ pub async fn match_excel_with_folder(
     })
 }
 
+/// 基于 Excel 的完整性检查结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExcelIntegrityResult {
+    pub total_rows: usize,
+    pub complete_count: usize,
+    pub incomplete_count: usize,
+    pub not_found_count: usize,
+    pub items: Vec<ExcelIntegrityItem>,
+    pub output_path: Option<String>,
+}
+
+/// 基于 Excel 的完整性检查项
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExcelIntegrityItem {
+    pub row_index: usize,
+    pub name: String,
+    pub folder_found: bool,
+    pub folder_path: Option<String>,
+    pub is_complete: bool,
+    pub check_results: Vec<TemplateCheckResult>,
+}
+
+/// 模板检查结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateCheckResult {
+    pub template: String,
+    pub expected_name: String,
+    pub exists: bool,
+}
+
 /// 从文件夹名提取姓名
 fn extract_name_from_folder(folder_name: &str, pattern: &str) -> String {
     // 常见模式: "2025-0001王宏琳" -> "王宏琳"
@@ -628,5 +661,296 @@ pub async fn scan_folder_tree(folder_path: String, max_depth: Option<usize>) -> 
         root,
         total_files,
         total_folders,
+    })
+}
+
+/// 基于 Excel 的完整性检查（在原 Excel 上标注结果）
+#[tauri::command]
+pub async fn check_integrity_with_excel(
+    excel_path: String,
+    sheet_index: usize,
+    name_column_index: usize,  // 姓名列索引
+    target_folder: String,     // 目标文件夹
+    templates: Vec<String>,    // 模板列表
+    folder_match_mode: String, // 文件夹匹配模式: "exact" | "contains" | "starts_with"
+    output_path: Option<String>,
+) -> Result<ExcelIntegrityResult, String> {
+    // 读取 Excel
+    let mut workbook: Xlsx<_> = open_workbook(&excel_path)
+        .map_err(|e| format!("无法打开 Excel 文件: {}", e))?;
+
+    let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
+    let sheet_name = sheet_names.get(sheet_index)
+        .ok_or("工作表索引无效")?
+        .clone();
+
+    let range = workbook.worksheet_range(&sheet_name)
+        .map_err(|e| format!("无法读取工作表: {}", e))?;
+
+    // 检查目标文件夹是否存在
+    let folder = Path::new(&target_folder);
+    if !folder.exists() {
+        return Err("目标文件夹不存在".to_string());
+    }
+
+    // 收集所有子文件夹信息
+    let mut folder_map: std::collections::HashMap<String, std::path::PathBuf> = std::collections::HashMap::new();
+    for entry in fs::read_dir(&folder).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name() {
+                let folder_name = name.to_string_lossy().to_string();
+                folder_map.insert(folder_name.clone(), path.clone());
+                // 也添加提取的中文名称作为索引
+                let extracted = extract_name_from_folder(&folder_name, "auto");
+                if extracted != folder_name {
+                    folder_map.insert(extracted, path);
+                }
+            }
+        }
+    }
+
+    let mut items: Vec<ExcelIntegrityItem> = Vec::new();
+    let mut complete_count = 0;
+    let mut incomplete_count = 0;
+    let mut not_found_count = 0;
+    let total_rows = if range.height() > 0 { range.height() - 1 } else { 0 };
+
+    // 遍历 Excel 行（跳过标题行）
+    for (row_idx, row) in range.rows().enumerate() {
+        if row_idx == 0 {
+            continue; // 跳过标题行
+        }
+
+        // 获取姓名列的值
+        let name = row.get(name_column_index)
+            .map(|cell| match cell {
+                Data::String(s) => s.clone(),
+                Data::Int(i) => i.to_string(),
+                Data::Float(f) => f.to_string(),
+                _ => String::new(),
+            })
+            .unwrap_or_default();
+
+        if name.trim().is_empty() {
+            continue;
+        }
+
+        // 查找匹配的文件夹
+        let mut matched_folder: Option<std::path::PathBuf> = None;
+        
+        for (folder_name, folder_path) in &folder_map {
+            let is_match = match folder_match_mode.as_str() {
+                "exact" => folder_name == &name,
+                "starts_with" => folder_name.starts_with(&name),
+                _ => folder_name.contains(&name), // 默认 contains
+            };
+            
+            if is_match {
+                matched_folder = Some(folder_path.clone());
+                break;
+            }
+        }
+
+        let folder_found = matched_folder.is_some();
+        let folder_path = matched_folder.as_ref().map(|p| p.to_string_lossy().to_string());
+
+        // 检查模板文件是否存在
+        let mut check_results: Vec<TemplateCheckResult> = Vec::new();
+        let mut is_complete = folder_found;
+
+        if let Some(ref matched_path) = matched_folder {
+            // 获取文件夹内容
+            let mut contents: HashSet<String> = HashSet::new();
+            if let Ok(entries) = fs::read_dir(matched_path) {
+                for item in entries.flatten() {
+                    if let Some(item_name) = item.path().file_name() {
+                        contents.insert(item_name.to_string_lossy().to_string());
+                        // 也添加不带扩展名的版本
+                        if let Some(stem) = item.path().file_stem() {
+                            contents.insert(stem.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+
+            // 检查每个模板
+            for template in &templates {
+                let expected_name = template.replace("{name}", &name);
+                let mut exists = false;
+
+                for content in &contents {
+                    if content == &expected_name || content.starts_with(&expected_name) {
+                        exists = true;
+                        break;
+                    }
+                }
+
+                if !exists {
+                    is_complete = false;
+                }
+
+                check_results.push(TemplateCheckResult {
+                    template: template.clone(),
+                    expected_name,
+                    exists,
+                });
+            }
+        } else {
+            // 文件夹未找到，所有模板都标记为不存在
+            for template in &templates {
+                check_results.push(TemplateCheckResult {
+                    template: template.clone(),
+                    expected_name: template.replace("{name}", &name),
+                    exists: false,
+                });
+            }
+        }
+
+        if is_complete {
+            complete_count += 1;
+        } else if folder_found {
+            incomplete_count += 1;
+        } else {
+            not_found_count += 1;
+        }
+
+        items.push(ExcelIntegrityItem {
+            row_index: row_idx,
+            name: name.clone(),
+            folder_found,
+            folder_path,
+            is_complete,
+            check_results,
+        });
+    }
+
+    // 如果指定了输出路径，在原 Excel 基础上标注
+    let final_output_path = if let Some(out_path) = output_path {
+        let mut new_workbook = Workbook::new();
+        let worksheet = new_workbook.add_worksheet();
+
+        // 定义格式
+        let header_format = Format::new()
+            .set_bold()
+            .set_background_color(Color::RGB(0xE8E8E8))
+            .set_border(FormatBorder::Thin);
+
+        let ok_format = Format::new()
+            .set_background_color(Color::RGB(0xD4EDDA));
+
+        let missing_format = Format::new()
+            .set_background_color(Color::RGB(0xFF6B6B));
+
+        let not_found_format = Format::new()
+            .set_background_color(Color::RGB(0xFFE66D));
+
+        let normal_format = Format::new();
+
+        // 写入原始数据 + 新增的检查结果列
+        let original_width = range.width();
+
+        for (row_idx, row) in range.rows().enumerate() {
+            let is_header = row_idx == 0;
+            
+            // 获取当前行的检查结果
+            let item = if row_idx > 0 {
+                items.get(row_idx - 1)
+            } else {
+                None
+            };
+
+            // 确定行格式
+            let row_format = if is_header {
+                &header_format
+            } else if let Some(item) = item {
+                if item.is_complete {
+                    &ok_format
+                } else if item.folder_found {
+                    &missing_format
+                } else {
+                    &not_found_format
+                }
+            } else {
+                &normal_format
+            };
+
+            // 写入原始列
+            for (col_idx, cell) in row.iter().enumerate() {
+                let value = match cell {
+                    Data::String(s) => s.clone(),
+                    Data::Int(i) => i.to_string(),
+                    Data::Float(f) => f.to_string(),
+                    Data::Bool(b) => b.to_string(),
+                    _ => String::new(),
+                };
+                worksheet.write_string_with_format(row_idx as u32, col_idx as u16, &value, row_format)
+                    .map_err(|e| format!("写入单元格失败: {}", e))?;
+            }
+
+            // 写入检查结果列
+            if is_header {
+                // 写入模板列标题
+                for (idx, template) in templates.iter().enumerate() {
+                    worksheet.write_string_with_format(
+                        0, 
+                        (original_width + idx) as u16, 
+                        template, 
+                        &header_format
+                    ).ok();
+                }
+                // 写入状态列标题
+                worksheet.write_string_with_format(
+                    0, 
+                    (original_width + templates.len()) as u16, 
+                    "检查结果", 
+                    &header_format
+                ).ok();
+            } else if let Some(item) = item {
+                // 写入每个模板的检查结果
+                for (idx, check) in item.check_results.iter().enumerate() {
+                    let status = if check.exists { "✓" } else { "✗" };
+                    let format = if check.exists { &ok_format } else { &missing_format };
+                    worksheet.write_string_with_format(
+                        row_idx as u32, 
+                        (original_width + idx) as u16, 
+                        status, 
+                        format
+                    ).ok();
+                }
+
+                // 写入总状态
+                let status = if item.is_complete {
+                    "完整"
+                } else if item.folder_found {
+                    "缺失文件"
+                } else {
+                    "未找到文件夹"
+                };
+                worksheet.write_string_with_format(
+                    row_idx as u32, 
+                    (original_width + templates.len()) as u16, 
+                    status, 
+                    row_format
+                ).ok();
+            }
+        }
+
+        new_workbook.save(&out_path)
+            .map_err(|e| format!("保存 Excel 失败: {}", e))?;
+
+        Some(out_path)
+    } else {
+        None
+    };
+
+    Ok(ExcelIntegrityResult {
+        total_rows,
+        complete_count,
+        incomplete_count,
+        not_found_count,
+        items,
+        output_path: final_output_path,
     })
 }

@@ -191,9 +191,76 @@ export const FilePreview: React.FC = () => {
         );
       }
 
-      // 分离文件夹和文件，文件夹排前面
-      const folders = children.filter(c => c.is_dir);
-      const files = children.filter(c => !c.is_dir);
+      // 获取当前排序配置
+      const { sortField, sortOrder } = useFileStore.getState();
+      
+      // 自然排序比较函数，支持数字按数值排序
+      // 例如: "file1" < "file2" < "file10"
+      const naturalCompare = (a: string, b: string): number => {
+        const aChars = [...a];
+        const bChars = [...b];
+        let i = 0, j = 0;
+        
+        while (i < aChars.length && j < bChars.length) {
+          const aIsDigit = /\d/.test(aChars[i]);
+          const bIsDigit = /\d/.test(bChars[j]);
+          
+          if (aIsDigit && bIsDigit) {
+            // 提取数字
+            let aNum = '';
+            while (i < aChars.length && /\d/.test(aChars[i])) {
+              aNum += aChars[i++];
+            }
+            let bNum = '';
+            while (j < bChars.length && /\d/.test(bChars[j])) {
+              bNum += bChars[j++];
+            }
+            const diff = parseInt(aNum, 10) - parseInt(bNum, 10);
+            if (diff !== 0) return diff;
+          } else if (aIsDigit) {
+            return -1;
+          } else if (bIsDigit) {
+            return 1;
+          } else {
+            // 比较字符（忽略大小写）
+            const aLower = aChars[i].toLowerCase();
+            const bLower = bChars[j].toLowerCase();
+            if (aLower < bLower) return -1;
+            if (aLower > bLower) return 1;
+            i++;
+            j++;
+          }
+        }
+        return aChars.length - bChars.length;
+      };
+      
+      // 排序函数
+      const sortItems = (items: typeof children) => {
+        return [...items].sort((a, b) => {
+          let compare = 0;
+          switch (sortField) {
+            case 'name':
+              compare = naturalCompare(a.name, b.name);
+              break;
+            case 'size':
+              compare = a.size - b.size;
+              break;
+            case 'modified_time':
+              compare = a.modified_time - b.modified_time;
+              break;
+            case 'extension':
+              compare = a.extension.localeCompare(b.extension);
+              break;
+            default:
+              compare = a.name.localeCompare(b.name, 'zh-CN', { numeric: true });
+          }
+          return sortOrder === 'asc' ? compare : -compare;
+        });
+      };
+
+      // 分离文件夹和文件，分别排序，文件夹排前面
+      const folders = sortItems(children.filter(c => c.is_dir));
+      const files = sortItems(children.filter(c => !c.is_dir));
       const sortedChildren = [...folders, ...files];
 
       return (
