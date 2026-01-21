@@ -1,25 +1,38 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Button, Typography, Space, Switch, Breadcrumb, Select, Dropdown } from 'antd';
+import { Button, Typography, Space, Switch, Select, Dropdown, Tag, Tooltip } from 'antd';
 import {
   FolderOpenOutlined,
   EyeOutlined,
   EyeInvisibleOutlined,
-  HomeOutlined,
   SortAscendingOutlined,
   CloudServerOutlined,
   DownOutlined,
+  CloseOutlined,
+  ClearOutlined,
 } from '@ant-design/icons';
 import { useFileStore, useSettingsStore, useRemoteStore } from '../../stores';
 import { FileTree } from './FileTree';
 import { FilePreview } from './FilePreview';
 import { useThemeColors } from '../../hooks';
 import { RemoteFolderSelector } from '../search/RemoteFolderSelector';
-import { splitPath, isRemotePath } from '../../utils/format';
+import { isRemotePath } from '../../utils/format';
 
 const { Title, Text } = Typography;
 
 export const FileBrowser: React.FC = () => {
-  const { currentPath, pickDirectory, setCurrentPath, showHidden, toggleShowHidden, sortField, sortOrder, setSortField, setSortOrder } = useFileStore();
+  const { 
+    currentPaths, 
+    pickDirectory, 
+    addPath,
+    removePath,
+    clearPaths,
+    showHidden, 
+    toggleShowHidden, 
+    sortField, 
+    sortOrder, 
+    setSortField, 
+    setSortOrder 
+  } = useFileStore();
   const { settings } = useSettingsStore();
   const { connections } = useRemoteStore();
   const colors = useThemeColors();
@@ -39,8 +52,11 @@ export const FileBrowser: React.FC = () => {
     }
   }, []);
 
-  // Parse path for breadcrumb (cross-platform)
-  const pathParts = splitPath(currentPath || '');
+  // 获取文件夹名称
+  const getFolderName = (path: string) => {
+    const parts = path.replace(/\\/g, '/').split('/');
+    return parts[parts.length - 1] || path;
+  };
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -101,6 +117,16 @@ export const FileBrowser: React.FC = () => {
               onChange={toggleShowHidden}
             />
           </Space>
+          {currentPaths.length > 0 && (
+            <Button
+              size="small"
+              icon={<ClearOutlined />}
+              onClick={clearPaths}
+              danger
+            >
+              清空全部
+            </Button>
+          )}
           <Dropdown
             menu={{
               items: [
@@ -122,16 +148,11 @@ export const FileBrowser: React.FC = () => {
           >
             <Button type="primary">
               <Space>
-                {currentPath ? (
-                  isRemotePath(currentPath) ? (
-                    <CloudServerOutlined />
-                  ) : (
-                    <FolderOpenOutlined />
-                  )
-                ) : (
-                  <FolderOpenOutlined />
-                )}
+                <FolderOpenOutlined />
                 <span>选择文件夹</span>
+                {currentPaths.length > 0 && (
+                  <Tag color="blue" style={{ marginLeft: 4 }}>{currentPaths.length}</Tag>
+                )}
                 <DownOutlined style={{ fontSize: 10 }} />
               </Space>
             </Button>
@@ -139,31 +160,33 @@ export const FileBrowser: React.FC = () => {
         </Space>
       </div>
 
-      {/* Breadcrumb */}
-      {currentPath && (
+      {/* 已选文件夹列表 */}
+      {currentPaths.length > 0 && (
         <div
           style={{
             padding: '8px 24px',
             borderBottom: `1px solid ${colors.border}`,
             background: colors.bgSecondary,
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 8,
           }}
         >
-          <Space>
-            {isRemotePath(currentPath) ? (
-              <CloudServerOutlined style={{ color: colors.accentPurple }} />
-            ) : (
-              <HomeOutlined style={{ color: colors.textSecondary }} />
-            )}
-            <Breadcrumb
-              items={pathParts.map((part, index) => ({
-                title: (
-                  <span style={{ color: index === pathParts.length - 1 ? colors.textPrimary : colors.textSecondary }}>
-                    {part}
-                  </span>
-                ),
-              }))}
-            />
-          </Space>
+          <Text type="secondary" style={{ lineHeight: '24px' }}>已选 {currentPaths.length} 个目录:</Text>
+          {currentPaths.map((path) => (
+            <Tag
+              key={path}
+              color={isRemotePath(path) ? 'purple' : 'blue'}
+              closable
+              onClose={() => removePath(path)}
+              style={{ margin: 0 }}
+            >
+              <Tooltip title={path}>
+                {isRemotePath(path) ? <CloudServerOutlined style={{ marginRight: 4 }} /> : <FolderOpenOutlined style={{ marginRight: 4 }} />}
+                {getFolderName(path)}
+              </Tooltip>
+            </Tag>
+          ))}
         </div>
       )}
 
@@ -179,7 +202,7 @@ export const FileBrowser: React.FC = () => {
             height: '100%',
           }}
         >
-          {currentPath ? (
+          {currentPaths.length > 0 ? (
             <FileTree />
           ) : (
             <div
@@ -208,7 +231,7 @@ export const FileBrowser: React.FC = () => {
       <RemoteFolderSelector
         open={showRemoteSelector}
         onClose={() => setShowRemoteSelector(false)}
-        onSelect={(path) => setCurrentPath(path)}
+        onSelect={(path) => addPath(path)}
       />
     </div>
   );

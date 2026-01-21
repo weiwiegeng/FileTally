@@ -59,10 +59,10 @@ const collectDirIds = (nodes: FileNode[], ids: Set<string>) => {
 };
 
 interface FileState {
-  // Current path
-  currentPath: string | null;
-  // File nodes at current path
-  nodes: FileNode[];
+  // Current paths (support multiple)
+  currentPaths: string[];
+  // File nodes map by root path
+  nodesMap: Record<string, FileNode[]>;
   // Selected file for preview
   selectedFile: FileNode | null;
   // Preview info
@@ -76,10 +76,15 @@ interface FileState {
   loading: boolean;
   previewLoading: boolean;
   error: string | null;
+  // Loading paths
+  loadingPaths: Set<string>;
   // Expanded node IDs for tree view
   expandedIds: Set<string>;
   // Actions
-  setCurrentPath: (path: string) => Promise<void>;
+  setCurrentPaths: (paths: string[]) => Promise<void>;
+  addPath: (path: string) => Promise<void>;
+  removePath: (path: string) => void;
+  clearPaths: () => void;
   pickDirectory: () => Promise<void>;
   loadChildren: (path: string, nodeId: string) => Promise<void>;
   selectFile: (file: FileNode | null) => Promise<void>;
@@ -90,11 +95,14 @@ interface FileState {
   toggleShowHidden: () => void;
   // 重命名文件/文件夹
   renameFile: (oldPath: string, newName: string) => Promise<{ success: boolean; error?: string }>;
+  // Compatibility: get first path as currentPath
+  currentPath: string | null;
+  nodes: FileNode[];
 }
 
 export const useFileStore = create<FileState>((set, get) => ({
-  currentPath: null,
-  nodes: [],
+  currentPaths: [],
+  nodesMap: {},
   selectedFile: null,
   previewInfo: null,
   viewMode: 'tree',
@@ -104,28 +112,114 @@ export const useFileStore = create<FileState>((set, get) => ({
   loading: false,
   previewLoading: false,
   error: null,
+  loadingPaths: new Set(),
   expandedIds: new Set(),
 
-  setCurrentPath: async (path: string) => {
-    set({ loading: true, error: null, currentPath: path });
+  // Compatibility getters
+  get currentPath() {
+    return get().currentPaths[0] || null;
+  },
+  get nodes() {
+    const { currentPaths, nodesMap } = get();
+    if (currentPaths.length === 0) return [];
+    // Return all nodes from all paths flattened
+    return currentPaths.flatMap(p => nodesMap[p] || []);
+  },
+
+  setCurrentPaths: async (paths: string[]) => {
+    if (paths.length === 0) {
+      set({ currentPaths: [], nodesMap: {}, loading: false, error: null, selectedFile: null, previewInfo: null, expandedIds: new Set() });
+      return;
+    }
+
+    set({ loading: true, error: null, currentPaths: paths, loadingPaths: new Set(paths), selectedFile: null, previewInfo: null });
+    
+    try {
+      // Parallel load all paths - only first level, collapsed by default
+      const results = await Promise.all(
+        paths.map(async (path) => {
+          try {
+            const nodes = await fileService.scanDirectory(path);
+            // Mark all nodes as loaded but don't expand
+            const loadedNodes = nodes.map(node => ({ ...node, is_loaded: node.is_dir ? false : true }));
+            return { path, nodes: loadedNodes, success: true };
+          } catch (error) {
+            console.error('Failed to load path:', path, error);
+            return { path, nodes: [], success: false };
+          }
+        })
+      );
+
+      // Build nodesMap - no expanded IDs (collapsed by default)
+      const nodesMap: Record<string, FileNode[]> = {};
+      results.forEach(({ path, nodes }) => {
+        nodesMap[path] = nodes;
+      });
+
+      set({ nodesMap, loading: false, expandedIds: new Set(), loadingPaths: new Set() });
+    } catch (error) {
+      set({ error: String(error), loading: false, loadingPaths: new Set() });
+    }
+  },
+
+  addPath: async (path: string) => {
+    const { currentPaths } = get();
+    if (currentPaths.includes(path)) return;
+
+    set(state => ({ 
+      currentPaths: [...state.currentPaths, path],
+      loadingPaths: new Set(state.loadingPaths).add(path)
+    }));
+
     try {
       const nodes = await fileService.scanDirectory(path);
-      const expandedIds = new Set<string>();
-      
-      // Recursively load all children and expand all directories
-      const loadedNodes = await loadAllChildren(nodes, expandedIds);
-      
-      set({ nodes: loadedNodes, loading: false, expandedIds });
+      // Only load first level, collapsed by default
+      const loadedNodes = nodes.map(node => ({ ...node, is_loaded: node.is_dir ? false : true }));
+
+      set(state => {
+        const newLoadingPaths = new Set(state.loadingPaths);
+        newLoadingPaths.delete(path);
+        return {
+          nodesMap: { ...state.nodesMap, [path]: loadedNodes },
+          loadingPaths: newLoadingPaths,
+        };
+      });
     } catch (error) {
-      set({ error: String(error), loading: false });
+      set(state => {
+        const newLoadingPaths = new Set(state.loadingPaths);
+        newLoadingPaths.delete(path);
+        return { error: String(error), loadingPaths: newLoadingPaths };
+      });
     }
+  },
+
+  removePath: (path: string) => {
+    set(state => {
+      const newPaths = state.currentPaths.filter(p => p !== path);
+      const newNodesMap = { ...state.nodesMap };
+      delete newNodesMap[path];
+      
+      // 如果没有剩余路径，或者选中的文件属于被移除的路径，清空选中状态
+      const shouldClearSelection = newPaths.length === 0 || 
+        (state.selectedFile && state.selectedFile.path.startsWith(path));
+      
+      return { 
+        currentPaths: newPaths, 
+        nodesMap: newNodesMap,
+        ...(shouldClearSelection ? { selectedFile: null, previewInfo: null } : {})
+      };
+    });
+  },
+
+  clearPaths: () => {
+    set({ currentPaths: [], nodesMap: {}, selectedFile: null, previewInfo: null, expandedIds: new Set() });
   },
 
   pickDirectory: async () => {
     try {
-      const path = await fileService.pickDirectory();
-      if (path) {
-        await get().setCurrentPath(path);
+      const selected = await fileService.pickDirectoryMultiple();
+      if (selected && selected.length > 0) {
+        await get().setCurrentPaths(selected);
       }
     } catch (error) {
       set({ error: String(error) });
@@ -135,10 +229,13 @@ export const useFileStore = create<FileState>((set, get) => ({
   loadChildren: async (path: string, nodeId: string) => {
     try {
       const children = await fileService.scanDirectory(path);
+      // Mark children as not loaded (collapsed)
+      const loadedChildren = children.map(node => ({ ...node, is_loaded: node.is_dir ? false : true }));
+      
       const updateNodes = (nodes: FileNode[]): FileNode[] => {
         return nodes.map((node) => {
           if (node.id === nodeId) {
-            return { ...node, children, is_loaded: true };
+            return { ...node, children: loadedChildren, is_loaded: true };
           }
           if (node.children) {
             return { ...node, children: updateNodes(node.children) };
@@ -146,7 +243,15 @@ export const useFileStore = create<FileState>((set, get) => ({
           return node;
         });
       };
-      set((state) => ({ nodes: updateNodes(state.nodes) }));
+      
+      // Update nodesMap
+      set((state) => {
+        const newNodesMap: Record<string, FileNode[]> = {};
+        Object.entries(state.nodesMap).forEach(([rootPath, nodes]) => {
+          newNodesMap[rootPath] = updateNodes(nodes);
+        });
+        return { nodesMap: newNodesMap };
+      });
     } catch (error) {
       console.error('Failed to load children:', error);
     }
@@ -154,7 +259,25 @@ export const useFileStore = create<FileState>((set, get) => ({
 
   selectFile: async (file: FileNode | null) => {
     set({ selectedFile: file, previewInfo: null });
-    if (file && !file.is_dir) {
+    
+    if (!file) return;
+    
+    if (file.is_dir) {
+      // 如果是文件夹且子内容未加载，加载子内容用于预览
+      if (!file.children || file.children.length === 0) {
+        set({ previewLoading: true });
+        try {
+          const children = await fileService.scanDirectory(file.path);
+          // 更新 selectedFile 的 children
+          const updatedFile = { ...file, children, is_loaded: true };
+          set({ selectedFile: updatedFile, previewLoading: false });
+        } catch (error) {
+          set({ previewLoading: false });
+          console.error('Failed to load folder contents:', error);
+        }
+      }
+    } else {
+      // 文件预览
       set({ previewLoading: true });
       try {
         const previewInfo = await fileService.getFilePreview(file.path);
@@ -193,8 +316,8 @@ export const useFileStore = create<FileState>((set, get) => ({
       }>('rename_file', { oldPath, newName });
 
       if (result.success) {
-        // 更新 selectedFile
-        const { selectedFile, nodes } = get();
+        // 获取当前状态
+        const { selectedFile, nodesMap } = get();
         
         // 递归更新节点路径的辅助函数
         const updateNodePath = (node: FileNode, oldPrefix: string, newPrefix: string): FileNode => {
@@ -214,10 +337,13 @@ export const useFileStore = create<FileState>((set, get) => ({
           return updatedNode;
         };
 
-        // 更新文件树
-        const updatedNodes = nodes.map(node => 
-          updateNodePath(node, oldPath, result.newPath)
-        );
+        // 更新 nodesMap
+        const updatedNodesMap: Record<string, FileNode[]> = {};
+        Object.entries(nodesMap).forEach(([rootPath, nodes]) => {
+          updatedNodesMap[rootPath] = nodes.map(node => 
+            updateNodePath(node, oldPath, result.newPath)
+          );
+        });
 
         // 更新选中文件
         let updatedSelectedFile = selectedFile;
@@ -235,7 +361,7 @@ export const useFileStore = create<FileState>((set, get) => ({
           };
         }
 
-        set({ nodes: updatedNodes, selectedFile: updatedSelectedFile });
+        set({ nodesMap: updatedNodesMap, selectedFile: updatedSelectedFile });
         return { success: true };
       } else {
         return { success: false, error: result.error || '重命名失败' };

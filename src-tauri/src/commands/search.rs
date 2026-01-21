@@ -275,48 +275,61 @@ fn search_single_file(
 
 #[tauri::command]
 pub async fn search_files(
-    path: String,
+    paths: Vec<String>,
     query: String,
     options: SearchOptions,
 ) -> Result<SearchResponse, String> {
-    let search_path = Path::new(&path);
-    
-    if !search_path.exists() {
-        return Err("搜索路径不存在".to_string());
+    if paths.is_empty() {
+        return Err("请选择至少一个搜索目录".to_string());
     }
     
-    // 第一步：收集所有需要搜索的文件路径
-    let files_to_search: Vec<PathBuf> = WalkDir::new(search_path)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|entry| {
-            let entry_path = entry.path();
-            
-            // 跳过目录
-            if entry_path.is_dir() {
-                return false;
-            }
-            
-            // 隐藏文件过滤
-            if !options.include_hidden && is_hidden(entry_path) {
-                return false;
-            }
-            
-            // 扩展名过滤
-            if let Some(ref exts) = options.file_extensions {
-                let extension = entry_path.extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
-                if !exts.is_empty() && !exts.iter().any(|e| e.eq_ignore_ascii_case(extension)) {
+    // 验证所有路径是否存在
+    for path in &paths {
+        let search_path = Path::new(path);
+        if !search_path.exists() {
+            return Err(format!("搜索路径不存在: {}", path));
+        }
+    }
+    
+    // 第一步：收集所有需要搜索的文件路径（从多个目录）
+    let mut files_to_search: Vec<PathBuf> = Vec::new();
+    
+    for path in &paths {
+        let search_path = Path::new(path);
+        let entries: Vec<PathBuf> = WalkDir::new(search_path)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|entry| {
+                let entry_path = entry.path();
+                
+                // 跳过目录
+                if entry_path.is_dir() {
                     return false;
                 }
-            }
-            
-            true
-        })
-        .map(|e| e.path().to_path_buf())
-        .collect();
+                
+                // 隐藏文件过滤
+                if !options.include_hidden && is_hidden(entry_path) {
+                    return false;
+                }
+                
+                // 扩展名过滤
+                if let Some(ref exts) = options.file_extensions {
+                    let extension = entry_path.extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    if !exts.is_empty() && !exts.iter().any(|e| e.eq_ignore_ascii_case(extension)) {
+                        return false;
+                    }
+                }
+                
+                true
+            })
+            .map(|e| e.path().to_path_buf())
+            .collect();
+        
+        files_to_search.extend(entries);
+    }
     
     // 第二步：并行搜索所有文件
     let max_pdf_size = options.max_pdf_size_mb.unwrap_or(30);
@@ -458,52 +471,65 @@ fn check_file_keywords(
 /// 多关键词检查命令
 #[tauri::command]
 pub async fn check_keywords(
-    path: String,
+    paths: Vec<String>,
     keywords: Vec<String>,
     options: SearchOptions,
 ) -> Result<KeywordCheckResponse, String> {
-    let search_path = Path::new(&path);
+    if paths.is_empty() {
+        return Err("请选择至少一个搜索目录".to_string());
+    }
     
-    if !search_path.exists() {
-        return Err("搜索路径不存在".to_string());
+    // 验证所有路径是否存在
+    for path in &paths {
+        let search_path = Path::new(path);
+        if !search_path.exists() {
+            return Err(format!("搜索路径不存在: {}", path));
+        }
     }
     
     if keywords.is_empty() {
         return Err("请提供至少一个关键词".to_string());
     }
     
-    // 第一步：收集所有需要搜索的文件路径
-    let files_to_check: Vec<PathBuf> = WalkDir::new(search_path)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|entry| {
-            let entry_path = entry.path();
-            
-            // 跳过目录
-            if entry_path.is_dir() {
-                return false;
-            }
-            
-            // 隐藏文件过滤
-            if !options.include_hidden && is_hidden(entry_path) {
-                return false;
-            }
-            
-            // 扩展名过滤
-            if let Some(ref exts) = options.file_extensions {
-                let extension = entry_path.extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
-                if !exts.is_empty() && !exts.iter().any(|e| e.eq_ignore_ascii_case(extension)) {
+    // 第一步：收集所有需要搜索的文件路径（从多个目录）
+    let mut files_to_check: Vec<PathBuf> = Vec::new();
+    
+    for path in &paths {
+        let search_path = Path::new(path);
+        let entries: Vec<PathBuf> = WalkDir::new(search_path)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|entry| {
+                let entry_path = entry.path();
+                
+                // 跳过目录
+                if entry_path.is_dir() {
                     return false;
                 }
-            }
-            
-            true
-        })
-        .map(|e| e.path().to_path_buf())
-        .collect();
+                
+                // 隐藏文件过滤
+                if !options.include_hidden && is_hidden(entry_path) {
+                    return false;
+                }
+                
+                // 扩展名过滤
+                if let Some(ref exts) = options.file_extensions {
+                    let extension = entry_path.extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    if !exts.is_empty() && !exts.iter().any(|e| e.eq_ignore_ascii_case(extension)) {
+                        return false;
+                    }
+                }
+                
+                true
+            })
+            .map(|e| e.path().to_path_buf())
+            .collect();
+        
+        files_to_check.extend(entries);
+    }
     
     // 第二步：并行检查所有文件
     let max_pdf_size = options.max_pdf_size_mb.unwrap_or(30);

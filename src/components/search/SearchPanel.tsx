@@ -11,7 +11,11 @@ import {
   Dropdown,
   Segmented,
   message,
+  Tag,
+  Spin,
+  Tree,
 } from 'antd';
+import type { TreeDataNode } from 'antd';
 import {
   SearchOutlined,
   FolderOpenOutlined,
@@ -22,10 +26,15 @@ import {
   DownOutlined,
   DownloadOutlined,
   CheckCircleOutlined,
+  CloseOutlined,
+  PlusOutlined,
+  FileOutlined,
+  FolderOutlined,
 } from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
 import { save } from '@tauri-apps/plugin-dialog';
 import { writeFile } from '@tauri-apps/plugin-fs';
+import { invoke } from '@tauri-apps/api/core';
 import * as XLSX from 'xlsx';
 import { useSearchStore, useSettingsStore, useRemoteStore, SearchMode } from '../../stores';
 import { useThemeColors } from '../../hooks';
@@ -42,11 +51,28 @@ const FILE_TYPE_OPTIONS = [
   { label: '配置文件', value: 'yaml,yml,toml,ini,conf' },
 ];
 
+// 文件夹内容类型（匹配后端 FileNode snake_case 字段）
+interface FolderContent {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  children_count?: number | null;
+}
+
+// 文件夹内容缓存
+interface FolderContentCache {
+  [path: string]: {
+    loading: boolean;
+    contents: FolderContent[];
+  };
+}
+
 export const SearchPanel: React.FC = () => {
   const {
     mode,
     query,
-    searchPath,
+    searchPaths,
     options,
     loading,
     totalScanned,
@@ -57,7 +83,9 @@ export const SearchPanel: React.FC = () => {
     keywordCheckKeywords,
     setMode,
     setQuery,
-    setSearchPath,
+    addSearchPath,
+    removeSearchPath,
+    setSearchPaths,
     setOptions,
     search,
     checkKeywords,
@@ -71,6 +99,8 @@ export const SearchPanel: React.FC = () => {
   const [selectedFileTypes, setSelectedFileTypes] = useState<string>('');
   const [showRemoteSelector, setShowRemoteSelector] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [folderContents, setFolderContents] = useState<FolderContentCache>({});
+  const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
   const initializedRef = useRef(false);
 
   // 初次加载时应用设置中的默认值
@@ -90,16 +120,135 @@ export const SearchPanel: React.FC = () => {
     try {
       const selected = await open({
         directory: true,
-        multiple: false,
-        title: '选择搜索目录',
+        multiple: true,  // 支持多选
+        title: '选择搜索目录（可多选）',
       });
       
       if (selected) {
-        setSearchPath(selected as string);
+        // selected 可能是单个字符串或数组
+        const paths = Array.isArray(selected) ? selected : [selected];
+        
+        // 替换模式：清空旧的，添加新的
+        setSearchPaths(paths);
+        setFolderContents({});
+        
+        // 设置所有路径为 loading 状态
+        setLoadingPaths(new Set(paths));
+        
+        // 并行加载所有根目录，使用 Promise.all 等待全部完成
+        const results = await Promise.all(
+          paths.map(async (path) => {
+            try {
+              const contents = await invoke<FolderContent[]>('scan_directory', { path });
+              return { path, contents, success: true };
+            } catch (err) {
+              console.error(`加载文件夹内容失败: ${path}`, err);
+              return { path, contents: [], success: false };
+            }
+          })
+        );
+        
+        // 一次性更新所有结果
+        const newContents: FolderContentCache = {};
+        results.forEach(({ path, contents }) => {
+          newContents[path] = { loading: false, contents };
+        });
+        setFolderContents(newContents);
+        setLoadingPaths(new Set());
       }
     } catch (err) {
       console.error('选择目录失败:', err);
     }
+  };
+
+  // 加载文件夹内容
+  const loadFolderContents = async (folderPath: string) => {
+    if (folderContents[folderPath]?.contents.length > 0) {
+      return; // 已缓存
+    }
+    
+    setLoadingPaths(prev => new Set(prev).add(folderPath));
+    setFolderContents(prev => ({
+      ...prev,
+      [folderPath]: { loading: true, contents: [] }
+    }));
+    
+    try {
+      const contents = await invoke<FolderContent[]>('scan_directory', {
+        path: folderPath
+      });
+      
+      setFolderContents(prev => ({
+        ...prev,
+        [folderPath]: { loading: false, contents }
+      }));
+    } catch (err) {
+      console.error('加载文件夹内容失败:', err);
+      setFolderContents(prev => ({
+        ...prev,
+        [folderPath]: { loading: false, contents: [] }
+      }));
+    } finally {
+      setLoadingPaths(prev => {
+        const next = new Set(prev);
+        next.delete(folderPath);
+        return next;
+      });
+    }
+  };
+
+  // 构建树节点数据
+  const buildTreeData = (rootPath: string): TreeDataNode[] => {
+    const cache = folderContents[rootPath];
+    if (!cache || cache.contents.length === 0) {
+      if (cache?.loading || loadingPaths.has(rootPath)) {
+        return [{ key: `${rootPath}-loading`, title: <Spin size="small" />, isLeaf: true }];
+      }
+      return [];
+    }
+    
+    return cache.contents.map(item => {
+      const node: TreeDataNode = {
+        key: item.path,
+        title: (
+          <Space size={4}>
+            <span>{item.name}</span>
+            {item.is_dir && item.children_count != null && item.children_count > 0 && (
+              <Tag color="blue" style={{ fontSize: 10, marginLeft: 4 }}>
+                {item.children_count} 项
+              </Tag>
+            )}
+          </Space>
+        ),
+        icon: item.is_dir ? (
+          <FolderOutlined style={{ color: colors.accentOrange }} />
+        ) : (
+          <FileOutlined style={{ color: colors.textSecondary }} />
+        ),
+        isLeaf: !item.is_dir,
+      };
+      
+      // 如果是文件夹且已加载子内容，递归构建
+      if (item.is_dir) {
+        const childCache = folderContents[item.path];
+        if (childCache?.contents.length > 0) {
+          node.children = buildTreeData(item.path);
+        } else if (loadingPaths.has(item.path)) {
+          node.children = [{ key: `${item.path}-loading`, title: <Spin size="small" />, isLeaf: true }];
+        }
+      }
+      
+      return node;
+    });
+  };
+
+  // 异步加载子节点
+  const onLoadData = async (treeNode: TreeDataNode): Promise<void> => {
+    const path = treeNode.key as string;
+    if (folderContents[path]?.contents.length > 0) {
+      return;
+    }
+    await loadFolderContents(path);
   };
 
   const handleSearch = () => {
@@ -227,25 +376,10 @@ export const SearchPanel: React.FC = () => {
           >
             <Button style={{ minWidth: 160 }}>
               <Space>
-                {searchPath ? (
-                  <>
-                    {isRemotePath(searchPath) ? (
-                      <CloudServerOutlined style={{ color: colors.accentPurple }} />
-                    ) : (
-                      <FolderOpenOutlined style={{ color: colors.accentOrange }} />
-                    )}
-                    <Text
-                      ellipsis
-                      style={{ maxWidth: 100, color: colors.accentBlue }}
-                    >
-                      {getPathName(searchPath)}
-                    </Text>
-                  </>
-                ) : (
-                  <>
-                    <FolderOpenOutlined />
-                    <span>选择目录</span>
-                  </>
+                <PlusOutlined />
+                <span>添加目录</span>
+                {searchPaths.length > 0 && (
+                  <Badge count={searchPaths.length} style={{ marginLeft: 4 }} />
                 )}
                 <DownOutlined style={{ fontSize: 10 }} />
               </Space>
@@ -270,7 +404,7 @@ export const SearchPanel: React.FC = () => {
             icon={mode === 'normal' ? <SearchOutlined /> : <CheckCircleOutlined />}
             onClick={handleSearch}
             loading={loading}
-            disabled={!query.trim() || !searchPath}
+            disabled={!query.trim() || searchPaths.length === 0}
           >
             {mode === 'normal' ? '搜索' : '检查'}
           </Button>
@@ -405,11 +539,112 @@ export const SearchPanel: React.FC = () => {
                 检查关键词: {keywordCheckKeywords.join(', ')}
               </Text>
             )}
-            {searchPath && (
+            {searchPaths.length > 0 && (
               <Text type="secondary" ellipsis style={{ maxWidth: 300 }}>
-                搜索路径: {searchPath}
+                搜索路径: {searchPaths.length} 个目录
               </Text>
             )}
+          </div>
+        )}
+
+        {/* 已选文件夹列表及内容预览 */}
+        {searchPaths.length > 0 && (
+          <div
+            style={{
+              background: colors.bgHover,
+              borderRadius: 8,
+              padding: 12,
+              maxHeight: 300,
+              overflow: 'auto',
+            }}
+          >
+            {/* 标题栏：显示数量 + 清空按钮 */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <Text type="secondary">已选 {searchPaths.length} 个目录</Text>
+              <Button
+                type="link"
+                size="small"
+                danger
+                onClick={() => {
+                  setSearchPaths([]);
+                  setFolderContents({});
+                }}
+              >
+                清空全部
+              </Button>
+            </div>
+            
+            {/* 每个根目录一棵树 */}
+            {searchPaths.map(rootPath => (
+              <div key={rootPath} style={{ marginBottom: 8 }}>
+                {/* 根目录标题 */}
+                <div 
+                  style={{ 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    gap: 8, 
+                    padding: '4px 8px',
+                    background: colors.bgSecondary,
+                    borderRadius: 4,
+                    marginBottom: 4,
+                  }}
+                >
+                  {isRemotePath(rootPath) ? (
+                    <CloudServerOutlined style={{ color: colors.accentPurple }} />
+                  ) : (
+                    <FolderOpenOutlined style={{ color: colors.accentOrange }} />
+                  )}
+                  <Text style={{ flex: 1 }} ellipsis title={rootPath}>
+                    {getPathName(rootPath)}
+                  </Text>
+                  <Tooltip title="移除">
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<CloseOutlined />}
+                      onClick={() => {
+                        removeSearchPath(rootPath);
+                        // 清理相关缓存
+                        const newCache = { ...folderContents };
+                        Object.keys(newCache).forEach(key => {
+                          if (key === rootPath || key.startsWith(rootPath + '/') || key.startsWith(rootPath + '\\')) {
+                            delete newCache[key];
+                          }
+                        });
+                        setFolderContents(newCache);
+                      }}
+                      style={{ color: colors.textSecondary }}
+                    />
+                  </Tooltip>
+                </div>
+                
+                {/* 树形内容 */}
+                {loadingPaths.has(rootPath) ? (
+                  <div style={{ textAlign: 'center', padding: 16 }}>
+                    <Spin size="small" />
+                    <Text type="secondary" style={{ marginLeft: 8 }}>加载中...</Text>
+                  </div>
+                ) : buildTreeData(rootPath).length === 0 ? (
+                  <Text type="secondary" style={{ padding: '8px 24px', display: 'block' }}>
+                    空文件夹
+                  </Text>
+                ) : (
+                  <Tree
+                    showIcon
+                    showLine={{ showLeafIcon: false }}
+                    treeData={buildTreeData(rootPath)}
+                    loadData={onLoadData}
+                    onExpand={(_, info) => {
+                      // 展开时加载内容
+                      if (info.expanded && info.node.key) {
+                        loadFolderContents(info.node.key as string);
+                      }
+                    }}
+                    style={{ background: 'transparent' }}
+                  />
+                )}
+              </div>
+            ))}
           </div>
         )}
       </Space>
@@ -418,7 +653,12 @@ export const SearchPanel: React.FC = () => {
       <RemoteFolderSelector
         open={showRemoteSelector}
         onClose={() => setShowRemoteSelector(false)}
-        onSelect={(path) => setSearchPath(path)}
+        onSelect={(path) => {
+          // 替换模式
+          setSearchPaths([path]);
+          setFolderContents({});
+          loadFolderContents(path);
+        }}
       />
     </div>
   );

@@ -35,4 +35,17 @@ export const fileService = {
     });
     return selected as string | null;
   },
+
+  /**
+   * Open directory picker dialog (multiple selection)
+   */
+  async pickDirectoryMultiple(): Promise<string[]> {
+    const selected = await open({
+      directory: true,
+      multiple: true,
+      title: '选择文件夹（可多选）',
+    });
+    if (!selected) return [];
+    return Array.isArray(selected) ? selected : [selected];
+  },
 };

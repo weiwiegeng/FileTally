@@ -62,7 +62,7 @@ interface SearchState {
   unmatchedFiles: UnmatchedFile[];
   loading: boolean;
   error: string | null;
-  searchPath: string | null;
+  searchPaths: string[];  // 改为多路径数组
   options: SearchOptions;
   
   // 多关键词检查结果
@@ -78,7 +78,9 @@ interface SearchState {
   // Actions
   setMode: (mode: SearchMode) => void;
   setQuery: (query: string) => void;
-  setSearchPath: (path: string) => void;
+  setSearchPaths: (paths: string[]) => void;  // 改为设置多路径
+  addSearchPath: (path: string) => void;      // 新增添加路径
+  removeSearchPath: (path: string) => void;   // 新增移除路径
   setOptions: (options: Partial<SearchOptions>) => void;
   search: () => Promise<void>;
   checkKeywords: () => Promise<void>;
@@ -93,7 +95,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   unmatchedFiles: [],
   loading: false,
   error: null,
-  searchPath: null,
+  searchPaths: [],  // 改为空数组
   options: {
     search_content: true,
     search_filename: true,
@@ -127,16 +129,26 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   
   setQuery: (query) => set({ query }),
   
-  setSearchPath: (path) => set({ searchPath: path }),
+  setSearchPaths: (paths) => set({ searchPaths: paths }),
+  
+  addSearchPath: (path) => set((state) => ({
+    searchPaths: state.searchPaths.includes(path) 
+      ? state.searchPaths 
+      : [...state.searchPaths, path]
+  })),
+  
+  removeSearchPath: (path) => set((state) => ({
+    searchPaths: state.searchPaths.filter(p => p !== path)
+  })),
   
   setOptions: (newOptions) => set((state) => ({
     options: { ...state.options, ...newOptions }
   })),
   
   search: async () => {
-    const { query, searchPath, options } = get();
+    const { query, searchPaths, options } = get();
     
-    if (!query.trim() || !searchPath) {
+    if (!query.trim() || searchPaths.length === 0) {
       set({ error: '请输入搜索关键词并选择搜索目录' });
       return;
     }
@@ -145,7 +157,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     
     try {
       const response = await invoke<SearchResponse>('search_files', {
-        path: searchPath,
+        paths: searchPaths,
         query: query.trim(),
         options,
       });
@@ -170,9 +182,9 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   },
   
   checkKeywords: async () => {
-    const { query, searchPath, options } = get();
+    const { query, searchPaths, options } = get();
     
-    if (!query.trim() || !searchPath) {
+    if (!query.trim() || searchPaths.length === 0) {
       set({ error: '请输入关键词并选择搜索目录' });
       return;
     }
@@ -189,7 +201,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     
     try {
       const response = await invoke<KeywordCheckResponse>('check_keywords', {
-        path: searchPath,
+        paths: searchPaths,
         keywords,
         options,
       });
