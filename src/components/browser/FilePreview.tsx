@@ -1,5 +1,6 @@
-import React from 'react';
-import { Typography, Descriptions, Empty, Spin, Tag } from 'antd';
+import React, { useState, useRef, useEffect } from 'react';
+import { Typography, Descriptions, Empty, Spin, Tag, Input, Button, message, Tooltip, List } from 'antd';
+import { EditOutlined, CheckOutlined, CloseOutlined, FolderOutlined, FileOutlined } from '@ant-design/icons';
 import { FileIcon } from './FileIcon';
 import { useFileStore } from '../../stores';
 import { useThemeColors } from '../../hooks';
@@ -14,6 +15,15 @@ import {
 } from '../preview';
 
 const { Text } = Typography;
+
+// 格式化文件大小
+const formatFileSize = (bytes: number): string => {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+};
 
 // Get preview type based on file extension
 const getPreviewType = (extension: string): string => {
@@ -40,8 +50,82 @@ const getPreviewType = (extension: string): string => {
 };
 
 export const FilePreview: React.FC = () => {
-  const { selectedFile, previewInfo, previewLoading } = useFileStore();
+  const { selectedFile, previewInfo, previewLoading, renameFile } = useFileStore();
   const colors = useThemeColors();
+  
+  // 重命名状态
+  const [isEditing, setIsEditing] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [renaming, setRenaming] = useState(false);
+  const inputRef = useRef<any>(null);
+
+  // 当选中文件变化时，重置编辑状态
+  useEffect(() => {
+    setIsEditing(false);
+    setNewName('');
+  }, [selectedFile?.path]);
+
+  // 进入编辑模式时聚焦输入框
+  useEffect(() => {
+    if (isEditing && inputRef.current) {
+      inputRef.current.focus();
+      // 选中文件名（不包括扩展名）
+      const dotIndex = newName.lastIndexOf('.');
+      if (dotIndex > 0 && !selectedFile?.is_dir) {
+        inputRef.current.setSelectionRange(0, dotIndex);
+      } else {
+        inputRef.current.select();
+      }
+    }
+  }, [isEditing]);
+
+  // 开始编辑
+  const handleStartEdit = () => {
+    if (selectedFile) {
+      setNewName(selectedFile.name);
+      setIsEditing(true);
+    }
+  };
+
+  // 取消编辑
+  const handleCancelEdit = () => {
+    setIsEditing(false);
+    setNewName('');
+  };
+
+  // 确认重命名
+  const handleConfirmRename = async () => {
+    if (!selectedFile || !newName.trim()) {
+      handleCancelEdit();
+      return;
+    }
+
+    // 名称未改变
+    if (newName === selectedFile.name) {
+      handleCancelEdit();
+      return;
+    }
+
+    setRenaming(true);
+    const result = await renameFile(selectedFile.path, newName.trim());
+    setRenaming(false);
+
+    if (result.success) {
+      message.success('重命名成功');
+      setIsEditing(false);
+    } else {
+      message.error(result.error || '重命名失败');
+    }
+  };
+
+  // 键盘事件
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      handleConfirmRename();
+    } else if (e.key === 'Escape') {
+      handleCancelEdit();
+    }
+  };
 
   if (!selectedFile) {
     return (
@@ -79,24 +163,122 @@ export const FilePreview: React.FC = () => {
 
   const previewType = getPreviewType(selectedFile.extension);
 
+  // 选中文件夹内的项目
+  const handleSelectChild = (child: typeof selectedFile) => {
+    if (child) {
+      useFileStore.getState().selectFile(child);
+    }
+  };
+
   const renderPreviewContent = () => {
     if (selectedFile.is_dir) {
+      const children = selectedFile.children || [];
+      
+      // 如果没有子内容
+      if (children.length === 0) {
+        return (
+          <div
+            style={{
+              background: colors.bgSecondary,
+              borderRadius: 8,
+              padding: 40,
+              textAlign: 'center',
+            }}
+          >
+            <FileIcon isDir={true} extension="" size={48} isOpen={true} />
+            <div style={{ marginTop: 16, color: colors.textSecondary }}>空文件夹</div>
+          </div>
+        );
+      }
+
+      // 分离文件夹和文件，文件夹排前面
+      const folders = children.filter(c => c.is_dir);
+      const files = children.filter(c => !c.is_dir);
+      const sortedChildren = [...folders, ...files];
+
       return (
         <div
           style={{
             background: colors.bgSecondary,
             borderRadius: 8,
-            padding: 20,
-            textAlign: 'center',
+            overflow: 'hidden',
           }}
         >
-          <FileIcon isDir={true} extension="" size={48} isOpen={true} />
-          <div style={{ marginTop: 16, color: colors.textPrimary }}>文件夹</div>
-          {selectedFile.children_count !== null && (
-            <Text type="secondary">
-              包含 {selectedFile.children_count} 个项目
-            </Text>
-          )}
+          {/* 文件夹统计信息 */}
+          <div
+            style={{
+              padding: '12px 16px',
+              borderBottom: `1px solid ${colors.border}`,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 16,
+            }}
+          >
+            <FileIcon isDir={true} extension="" size={24} isOpen={true} />
+            <div>
+              <Text style={{ color: colors.textPrimary }}>
+                共 {children.length} 个项目
+              </Text>
+              <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                ({folders.length} 个文件夹, {files.length} 个文件)
+              </Text>
+            </div>
+          </div>
+          
+          {/* 子内容列表 */}
+          <List
+            dataSource={sortedChildren}
+            style={{ maxHeight: 400, overflow: 'auto' }}
+            renderItem={(item) => (
+              <List.Item
+                onClick={() => handleSelectChild(item)}
+                style={{
+                  padding: '10px 16px',
+                  cursor: 'pointer',
+                  transition: 'background 0.2s',
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = colors.bgHover || 'rgba(0,0,0,0.04)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'transparent';
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%' }}>
+                  <FileIcon
+                    isDir={item.is_dir}
+                    extension={item.extension}
+                    size={20}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <Text
+                      style={{
+                        color: colors.textPrimary,
+                        display: 'block',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {item.name}
+                    </Text>
+                  </div>
+                  {/* 如果是文件夹且有子内容，显示数量 */}
+                  {item.is_dir && item.children_count !== null && item.children_count > 0 && (
+                    <Tag color="blue" style={{ marginRight: 0 }}>
+                      {item.children_count} 项
+                    </Tag>
+                  )}
+                  {/* 文件显示大小 */}
+                  {!item.is_dir && item.size > 0 && (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {formatFileSize(item.size)}
+                    </Text>
+                  )}
+                </div>
+              </List.Item>
+            )}
+          />
         </div>
       );
     }
@@ -177,19 +359,64 @@ export const FilePreview: React.FC = () => {
           size={32}
         />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <Text
-            strong
-            style={{
-              color: colors.textPrimary,
-              fontSize: 16,
-              display: 'block',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {selectedFile.name}
-          </Text>
+          {isEditing ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Input
+                ref={inputRef}
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={handleKeyDown}
+                onBlur={() => {
+                  // 延迟处理，避免点击按钮时立即失焦
+                  setTimeout(() => {
+                    if (isEditing && !renaming) {
+                      handleCancelEdit();
+                    }
+                  }, 200);
+                }}
+                style={{ flex: 1 }}
+                disabled={renaming}
+              />
+              <Button
+                type="primary"
+                size="small"
+                icon={<CheckOutlined />}
+                onClick={handleConfirmRename}
+                loading={renaming}
+              />
+              <Button
+                size="small"
+                icon={<CloseOutlined />}
+                onClick={handleCancelEdit}
+                disabled={renaming}
+              />
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Text
+                strong
+                style={{
+                  color: colors.textPrimary,
+                  fontSize: 16,
+                  flex: 1,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {selectedFile.name}
+              </Text>
+              <Tooltip title="重命名">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={handleStartEdit}
+                  style={{ color: colors.textSecondary }}
+                />
+              </Tooltip>
+            </div>
+          )}
           <Text
             type="secondary"
             style={{
@@ -198,6 +425,7 @@ export const FilePreview: React.FC = () => {
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
+              marginTop: 4,
             }}
           >
             {selectedFile.path}

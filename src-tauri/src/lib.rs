@@ -1,7 +1,7 @@
 mod commands;
 mod models;
 
-use commands::{get_disks, get_file_preview, get_home_dir, refresh_disks, scan_directory, scan_directory_recursive, search_files, check_keywords, check_path_exists, list_volumes, analyze_folder, scan_cleanup_suggestions, check_transfer_conflicts, transfer_files, get_path_info, list_folder_contents, read_excel_info, match_excel_with_folder, check_folder_integrity, scan_folder_tree};
+use commands::{get_disks, get_file_preview, get_home_dir, refresh_disks, scan_directory, scan_directory_recursive, search_files, check_keywords, check_path_exists, list_volumes, analyze_folder, scan_cleanup_suggestions, check_transfer_conflicts, transfer_files, get_path_info, list_folder_contents, read_excel_info, match_excel_with_folder, check_folder_integrity, scan_folder_tree, rename_file};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -29,7 +29,8 @@ pub fn run() {
             read_excel_info,
             match_excel_with_folder,
             check_folder_integrity,
-            scan_folder_tree
+            scan_folder_tree,
+            rename_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

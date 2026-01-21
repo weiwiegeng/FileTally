@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { FileNode, FilePreviewInfo, ViewMode, SortField, SortOrder } from '../types';
 import { fileService } from '../services';
+import { invoke } from '@tauri-apps/api/core';
 
 // Helper function to recursively load all children (with depth limit)
 const loadAllChildren = async (
@@ -87,6 +88,8 @@ interface FileState {
   setSortField: (field: SortField) => void;
   setSortOrder: (order: SortOrder) => void;
   toggleShowHidden: () => void;
+  // 重命名文件/文件夹
+  renameFile: (oldPath: string, newName: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 export const useFileStore = create<FileState>((set, get) => ({
@@ -179,4 +182,66 @@ export const useFileStore = create<FileState>((set, get) => ({
   setSortField: (field: SortField) => set({ sortField: field }),
   setSortOrder: (order: SortOrder) => set({ sortOrder: order }),
   toggleShowHidden: () => set((state) => ({ showHidden: !state.showHidden })),
+
+  renameFile: async (oldPath: string, newName: string) => {
+    try {
+      const result = await invoke<{
+        success: boolean;
+        newPath: string;
+        newName: string;
+        error: string | null;
+      }>('rename_file', { oldPath, newName });
+
+      if (result.success) {
+        // 更新 selectedFile
+        const { selectedFile, nodes } = get();
+        
+        // 递归更新节点路径的辅助函数
+        const updateNodePath = (node: FileNode, oldPrefix: string, newPrefix: string): FileNode => {
+          const updatedNode = { ...node };
+          if (node.path.startsWith(oldPrefix)) {
+            updatedNode.path = node.path.replace(oldPrefix, newPrefix);
+          }
+          if (node.path === oldPath) {
+            updatedNode.name = newName;
+            updatedNode.path = result.newPath;
+          }
+          if (node.children) {
+            updatedNode.children = node.children.map(child => 
+              updateNodePath(child, oldPrefix, newPrefix)
+            );
+          }
+          return updatedNode;
+        };
+
+        // 更新文件树
+        const updatedNodes = nodes.map(node => 
+          updateNodePath(node, oldPath, result.newPath)
+        );
+
+        // 更新选中文件
+        let updatedSelectedFile = selectedFile;
+        if (selectedFile && selectedFile.path === oldPath) {
+          updatedSelectedFile = {
+            ...selectedFile,
+            name: newName,
+            path: result.newPath,
+          };
+        } else if (selectedFile && selectedFile.path.startsWith(oldPath + '/')) {
+          // 如果选中的是重命名文件夹的子文件
+          updatedSelectedFile = {
+            ...selectedFile,
+            path: selectedFile.path.replace(oldPath, result.newPath),
+          };
+        }
+
+        set({ nodes: updatedNodes, selectedFile: updatedSelectedFile });
+        return { success: true };
+      } else {
+        return { success: false, error: result.error || '重命名失败' };
+      }
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  },
 }));

@@ -410,3 +410,80 @@ pub fn list_volumes() -> Result<Vec<String>, String> {
     
     Ok(volumes)
 }
+
+/// 重命名响应
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameResult {
+    pub success: bool,
+    pub new_path: String,
+    pub new_name: String,
+    pub error: Option<String>,
+}
+
+/// 重命名文件或文件夹
+#[tauri::command]
+pub fn rename_file(old_path: String, new_name: String) -> Result<RenameResult, String> {
+    let old_path = Path::new(&old_path);
+    
+    // 检查原路径是否存在
+    if !old_path.exists() {
+        return Ok(RenameResult {
+            success: false,
+            new_path: String::new(),
+            new_name: String::new(),
+            error: Some("文件或文件夹不存在".to_string()),
+        });
+    }
+    
+    // 检查新名称是否合法
+    if new_name.is_empty() {
+        return Ok(RenameResult {
+            success: false,
+            new_path: String::new(),
+            new_name: String::new(),
+            error: Some("名称不能为空".to_string()),
+        });
+    }
+    
+    // 检查非法字符
+    let invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+    if new_name.chars().any(|c| invalid_chars.contains(&c)) {
+        return Ok(RenameResult {
+            success: false,
+            new_path: String::new(),
+            new_name: String::new(),
+            error: Some("名称包含非法字符 (/ \\ : * ? \" < > |)".to_string()),
+        });
+    }
+    
+    // 构建新路径
+    let parent = old_path.parent().ok_or("无法获取父目录")?;
+    let new_path = parent.join(&new_name);
+    
+    // 检查新路径是否已存在
+    if new_path.exists() {
+        return Ok(RenameResult {
+            success: false,
+            new_path: String::new(),
+            new_name: String::new(),
+            error: Some("同名文件或文件夹已存在".to_string()),
+        });
+    }
+    
+    // 执行重命名
+    match fs::rename(old_path, &new_path) {
+        Ok(_) => Ok(RenameResult {
+            success: true,
+            new_path: new_path.to_string_lossy().to_string(),
+            new_name,
+            error: None,
+        }),
+        Err(e) => Ok(RenameResult {
+            success: false,
+            new_path: String::new(),
+            new_name: String::new(),
+            error: Some(format!("重命名失败: {}", e)),
+        }),
+    }
+}
