@@ -97,6 +97,9 @@ interface TransferState {
   
   // 重置
   reset: () => void;
+  
+  // 设置进度
+  setProgress: (progress: TransferProgress | null) => void;
 }
 
 // 格式化文件大小
@@ -274,4 +277,6 @@ export const useTransferStore = create<TransferState>((set, get) => ({
     conflicts: [],
     showConflictModal: false,
   }),
+  
+  setProgress: (progress) => set({ progress }),
 }));

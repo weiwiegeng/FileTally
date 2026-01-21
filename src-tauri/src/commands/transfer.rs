@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter};
 
 /// 冲突文件信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +36,17 @@ pub struct TransferResult {
     pub skipped: usize,
     pub failed: usize,
     pub errors: Vec<String>,
+}
+
+/// 传输进度事件
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferProgress {
+    pub current_file: String,
+    pub current_index: u64,
+    pub total_files: u64,
+    pub stage: String,  // "counting" | "transferring"
+    pub message: String,
 }
 
 /// 路径信息
@@ -225,6 +239,7 @@ fn calculate_dir_size(path: &Path) -> u64 {
 /// 执行文件传输
 #[tauri::command]
 pub async fn transfer_files(
+    app: AppHandle,
     source_paths: Vec<String>,
     target_path: String,
     conflict_resolution: String,
@@ -235,10 +250,32 @@ pub async fn transfer_files(
         return Err("目标目录不存在".to_string());
     }
     
+    // 第一阶段：统计总文件数
+    let _ = app.emit("transfer-progress", TransferProgress {
+        current_file: String::new(),
+        current_index: 0,
+        total_files: 0,
+        stage: "counting".to_string(),
+        message: "正在统计文件数量...".to_string(),
+    });
+    
+    let mut total_files: u64 = 0;
+    for source_path in &source_paths {
+        let source = Path::new(source_path);
+        if source.exists() {
+            if source.is_file() {
+                total_files += 1;
+            } else {
+                total_files += count_files_in_dir(source);
+            }
+        }
+    }
+    
     let mut transferred = 0;
     let mut skipped = 0;
     let mut failed = 0;
     let mut errors = Vec::new();
+    let processed = Arc::new(AtomicU64::new(0));
     
     for source_path in &source_paths {
         let source = Path::new(source_path);
@@ -284,11 +321,21 @@ pub async fn transfer_files(
             }
         }
         
+        // 发送进度
+        let current = processed.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = app.emit("transfer-progress", TransferProgress {
+            current_file: file_name.clone(),
+            current_index: current,
+            total_files,
+            stage: "transferring".to_string(),
+            message: format!("正在复制: {}", file_name),
+        });
+        
         // 执行复制
         let result = if source.is_file() {
             fs::copy(source, &target_file_path).map(|_| ())
         } else {
-            copy_dir_recursive(source, &target_file_path)
+            copy_dir_recursive_with_progress(source, &target_file_path, &app, &processed, total_files)
         };
         
         match result {
@@ -307,6 +354,22 @@ pub async fn transfer_files(
         failed,
         errors,
     })
+}
+
+/// 统计目录中的文件数量
+fn count_files_in_dir(path: &Path) -> u64 {
+    let mut count = 0;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_file() {
+                count += 1;
+            } else if entry_path.is_dir() {
+                count += count_files_in_dir(&entry_path);
+            }
+        }
+    }
+    count
 }
 
 /// 生成唯一文件名（添加数字后缀）
@@ -361,6 +424,46 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         if src_path.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    
+    Ok(())
+}
+
+/// 递归复制目录（带进度回调）
+fn copy_dir_recursive_with_progress(
+    src: &Path,
+    dst: &Path,
+    app: &AppHandle,
+    processed: &Arc<AtomicU64>,
+    total_files: u64,
+) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        
+        if src_path.is_dir() {
+            copy_dir_recursive_with_progress(&src_path, &dst_path, app, processed, total_files)?;
+        } else {
+            // 复制文件并发送进度
+            let current = processed.fetch_add(1, Ordering::SeqCst) + 1;
+            let file_name = src_path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            
+            let _ = app.emit("transfer-progress", TransferProgress {
+                current_file: file_name.clone(),
+                current_index: current,
+                total_files,
+                stage: "transferring".to_string(),
+                message: format!("正在复制: {}", file_name),
+            });
+            
             fs::copy(&src_path, &dst_path)?;
         }
     }

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Card,
   Button,
@@ -37,6 +37,7 @@ import {
 } from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { useTransferStore, useRemoteStore, TransferItem, TransferDirection } from '../../stores';
 import { useThemeColors } from '../../hooks';
 import { RemoteFolderSelector } from '../search/RemoteFolderSelector';
@@ -74,6 +75,7 @@ export const FileTransfer: React.FC = () => {
     checkConflicts,
     startTransfer,
     reset,
+    setProgress,
   } = useTransferStore();
   const { connections } = useRemoteStore();
   const colors = useThemeColors();
@@ -83,6 +85,52 @@ export const FileTransfer: React.FC = () => {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [folderContents, setFolderContents] = useState<Map<string, TransferItem[]>>(new Map());
   const [loadingFolders, setLoadingFolders] = useState<Set<string>>(new Set());
+
+  // 监听传输进度事件
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    
+    const setupListener = async () => {
+      unlisten = await listen<{
+        currentFile: string;
+        currentIndex: number;
+        totalFiles: number;
+        stage: string;
+        message: string;
+      }>('transfer-progress', (event) => {
+        const { currentFile, currentIndex, totalFiles, stage, message } = event.payload;
+        
+        if (stage === 'counting') {
+          setProgress({
+            currentFile: '',
+            currentIndex: 0,
+            totalFiles: 0,
+            bytesTransferred: 0,
+            totalBytes: 0,
+            percentage: 0,
+          });
+        } else {
+          const percentage = totalFiles > 0 ? Math.round((currentIndex / totalFiles) * 100) : 0;
+          setProgress({
+            currentFile,
+            currentIndex,
+            totalFiles,
+            bytesTransferred: 0,
+            totalBytes: 0,
+            percentage,
+          });
+        }
+      });
+    };
+    
+    setupListener();
+    
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, [setProgress]);
 
   // 选择本地文件
   const handleSelectFiles = async () => {
@@ -644,12 +692,24 @@ export const FileTransfer: React.FC = () => {
           <Card style={{ marginTop: 24, background: colors.bgCard }}>
             <Space direction="vertical" style={{ width: '100%' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <Text>正在传输: {progress.currentFile}</Text>
+                <Text>
+                  {progress.totalFiles === 0 
+                    ? '正在统计文件数量...' 
+                    : `正在传输: ${progress.currentFile || '准备中...'}`
+                  }
+                </Text>
                 <Text type="secondary">
-                  {progress.currentIndex} / {progress.totalFiles}
+                  {progress.totalFiles > 0 
+                    ? `${progress.currentIndex} / ${progress.totalFiles}`
+                    : ''
+                  }
                 </Text>
               </div>
-              <Progress percent={progress.percentage} status="active" />
+              <Progress 
+                percent={progress.percentage} 
+                status="active" 
+                format={(percent) => progress.totalFiles === 0 ? '统计中' : `${percent}%`}
+              />
             </Space>
           </Card>
         )}
