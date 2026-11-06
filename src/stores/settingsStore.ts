@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { SortField, SortOrder } from '../types';
+import { normalizeSortField } from '../utils/sortFiles';
 
 // AI 模型提供商类型
 export type AIProvider = 'openai' | 'claude' | 'ollama' | 'custom';
@@ -14,17 +16,19 @@ export interface AIConfig {
   temperature: number;
 }
 
+export type DefaultPage = 'disk' | 'browser' | 'filter' | 'remote' | 'transfer' | 'excel' | 'ai' | 'settings';
+
 export interface AppSettings {
   // 通用设置
   language: 'zh-CN' | 'en-US';
   theme: 'dark' | 'light' | 'system';
-  defaultPage: 'disk' | 'browser' | 'search' | 'remote';
+  defaultPage: DefaultPage;
   
   // 文件浏览设置
   showHiddenFiles: boolean;
   defaultExpandLevel: number;       // 默认展开层级
-  sortBy: 'name' | 'size' | 'date' | 'type';
-  sortOrder: 'asc' | 'desc';
+  sortBy: SortField;
+  sortOrder: SortOrder;
   previewPanelPosition: 'right' | 'bottom';
   
   // 搜索设置
@@ -32,6 +36,7 @@ export interface AppSettings {
   defaultSearchFilename: boolean;
   defaultCaseSensitive: boolean;
   maxPdfSizeMB: number;            // PDF 最大处理大小 (MB)
+  maxTextSizeMB: number;           // 文本最大读取大小 (MB)
   searchTimeout: number;           // 搜索超时 (秒)
   
   // 性能设置
@@ -66,6 +71,7 @@ const defaultSettings: AppSettings = {
   defaultSearchFilename: true,
   defaultCaseSensitive: false,
   maxPdfSizeMB: 30,
+  maxTextSizeMB: 10,
   searchTimeout: 60,
   
   // 性能设置
@@ -81,6 +87,15 @@ const defaultSettings: AppSettings = {
     maxTokens: 4096,
     temperature: 0.7,
   },
+};
+
+const normalizeDefaultPage = (value: string | undefined): DefaultPage => {
+  if (value === 'search') return 'filter';
+  const allowed: DefaultPage[] = ['disk', 'browser', 'filter', 'remote', 'transfer', 'excel', 'ai', 'settings'];
+  if (value && (allowed as string[]).includes(value)) {
+    return value as DefaultPage;
+  }
+  return 'disk';
 };
 
 export const useSettingsStore = create<SettingsState>()(
@@ -103,15 +118,18 @@ export const useSettingsStore = create<SettingsState>()(
       // 处理旧版本数据迁移，确保新字段有默认值
       merge: (persistedState: any, currentState) => {
         const persisted = persistedState as SettingsState;
+        const raw = persisted?.settings || {};
         return {
           ...currentState,
           settings: {
             ...defaultSettings,
-            ...persisted?.settings,
+            ...raw,
+            defaultPage: normalizeDefaultPage(raw.defaultPage),
+            sortBy: normalizeSortField(raw.sortBy || defaultSettings.sortBy),
             // 确保 aiConfig 存在且完整
             aiConfig: {
               ...defaultSettings.aiConfig,
-              ...persisted?.settings?.aiConfig,
+              ...raw.aiConfig,
             },
           },
         };

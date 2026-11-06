@@ -13,14 +13,6 @@ export interface FileNode {
   is_hidden: boolean;
 }
 
-export interface DirectoryScanResult {
-  root_path: string;
-  nodes: FileNode[];
-  total_files: number;
-  total_dirs: number;
-  total_size: number;
-}
-
 export interface FileMetadata {
   name: string;
   path: string;

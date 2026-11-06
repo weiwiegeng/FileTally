@@ -12,6 +12,7 @@ import {
   LoadingOutlined,
   GlobalOutlined,
 } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import { useRemoteStore, RemoteConnection } from '../../stores';
 import { openUrl } from '@tauri-apps/plugin-opener';
 
@@ -35,19 +36,6 @@ const getStatusIcon = (status: RemoteConnection['status']) => {
   }
 };
 
-const getStatusTag = (status: RemoteConnection['status']) => {
-  switch (status) {
-    case 'connected':
-      return <Tag color="success">已连接</Tag>;
-    case 'connecting':
-      return <Tag color="processing">连接中</Tag>;
-    case 'error':
-      return <Tag color="error">连接失败</Tag>;
-    default:
-      return <Tag>未连接</Tag>;
-  }
-};
-
 const getTypeLabel = (type: RemoteConnection['type']) => {
   switch (type) {
     case 'smb':
@@ -65,32 +53,46 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
   onEdit,
   onBrowse,
 }) => {
+  const { t } = useTranslation();
   const { connections, removeConnection, connect, disconnect, connecting } = useRemoteStore();
+
+  const getStatusTag = (status: RemoteConnection['status']) => {
+    switch (status) {
+      case 'connected':
+        return <Tag color="success">{t('remote.connectionList.statusConnected')}</Tag>;
+      case 'connecting':
+        return <Tag color="processing">{t('remote.connectionList.statusConnecting')}</Tag>;
+      case 'error':
+        return <Tag color="error">{t('remote.connectionList.statusFailed')}</Tag>;
+      default:
+        return <Tag>{t('remote.connectionList.statusDisconnected')}</Tag>;
+    }
+  };
 
   const handleConnect = async (conn: RemoteConnection) => {
     if (conn.status === 'connected') {
       await disconnect(conn.id);
-      message.info('已断开连接');
+      message.info(t('remote.connectionList.disconnected'));
     } else {
-      // 尝试在 Finder 中打开 SMB 路径
-      const smbUrl = `smb://${conn.host}/${conn.share}`;
-      try {
-        await openUrl(smbUrl);
-        message.success('正在打开远程连接，请在系统对话框中输入凭据');
-        await connect(conn.id);
-      } catch (err) {
-        message.error('无法打开连接: ' + String(err));
+      message.loading({ content: t('remote.connectionList.connecting'), key: 'remote-connect' });
+      const ok = await connect(conn.id);
+      if (ok) {
+        message.success({ content: t('remote.connectionList.connectedSuccess'), key: 'remote-connect' });
+      } else {
+        const latest = useRemoteStore.getState().connections.find((c) => c.id === conn.id);
+        message.error({
+          content: latest?.error || t('remote.connectionList.connectFailedFallback'),
+          key: 'remote-connect',
+        });
       }
     }
   };
 
   const handleBrowse = async (conn: RemoteConnection) => {
-    // 打开挂载点目录
-    const mountPoint = `/Volumes/${conn.share}`;
+    const mountPoint = conn.mountPoint || `/Volumes/${conn.share}`;
     try {
       await openUrl(`file://${mountPoint}`);
     } catch {
-      // 如果打开失败，尝试打开 SMB URL
       const smbUrl = `smb://${conn.host}/${conn.share}`;
       await openUrl(smbUrl);
     }
@@ -107,8 +109,8 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
         }}
       >
         <CloudServerOutlined style={{ fontSize: 48, marginBottom: 16 }} />
-        <div>暂无保存的连接</div>
-        <Text type="secondary">点击"添加连接"创建新的远程连接</Text>
+        <div>{t('remote.connectionList.emptyTitle')}</div>
+        <Text type="secondary">{t('remote.connectionList.emptyHint')}</Text>
       </div>
     );
   }
@@ -131,16 +133,24 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
             }
             extra={getStatusTag(conn.status)}
             actions={[
-              <Tooltip title={conn.status === 'connected' ? '断开连接' : '连接'} key="connect">
+              <Tooltip
+                title={
+                  conn.status === 'connected'
+                    ? t('remote.connectionList.tooltipDisconnect')
+                    : t('remote.connectionList.tooltipConnect')
+                }
+                key="connect"
+              >
                 <Button
                   type="text"
                   size="small"
                   icon={conn.status === 'connected' ? <DisconnectOutlined /> : <LinkOutlined />}
                   onClick={() => handleConnect(conn)}
-                  loading={connecting && conn.status === 'connecting'}
+                  loading={connecting && (conn.status === 'connecting' || connecting)}
+                  disabled={connecting && conn.status !== 'connecting' && conn.status !== 'connected'}
                 />
               </Tooltip>,
-              <Tooltip title="在 Finder 中打开" key="browse">
+              <Tooltip title={t('remote.connectionList.tooltipOpenFinder')} key="browse">
                 <Button
                   type="text"
                   size="small"
@@ -148,7 +158,7 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
                   onClick={() => handleBrowse(conn)}
                 />
               </Tooltip>,
-              <Tooltip title="编辑" key="edit">
+              <Tooltip title={t('remote.connectionList.tooltipEdit')} key="edit">
                 <Button
                   type="text"
                   size="small"
@@ -157,10 +167,10 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
                 />
               </Tooltip>,
               <Popconfirm
-                title="确定删除此连接？"
+                title={t('remote.connectionList.deleteConfirm')}
                 onConfirm={() => {
                   removeConnection(conn.id);
-                  message.success('连接已删除');
+                  message.success(t('remote.connectionList.deleteSuccess'));
                 }}
                 key="delete"
               >
@@ -195,7 +205,9 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
             {conn.lastConnected && (
               <div style={{ marginTop: 8 }}>
                 <Text type="secondary" style={{ fontSize: 11 }}>
-                  上次连接: {new Date(conn.lastConnected).toLocaleString()}
+                  {t('remote.connectionList.lastConnected', {
+                    datetime: new Date(conn.lastConnected).toLocaleString(),
+                  })}
                 </Text>
               </div>
             )}

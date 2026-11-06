@@ -6,17 +6,19 @@ import {
   FileTextOutlined,
   RobotOutlined,
 } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import { useAnalysisStore } from '../../stores';
 import { useThemeColors } from '../../hooks';
 import { FolderAnalysisTab } from './FolderAnalysisTab';
 import { CleanupSuggestionTab } from './CleanupSuggestionTab';
 import { DocumentAssistantTab } from './DocumentAssistantTab';
 
-const { Title, Text } = Typography;
+const { Title } = Typography;
 
 export const AIAnalysis: React.FC = () => {
   const { activeTab, setActiveTab } = useAnalysisStore();
   const colors = useThemeColors();
+  const { t } = useTranslation();
 
   const tabItems = [
     {
@@ -24,7 +26,7 @@ export const AIAnalysis: React.FC = () => {
       label: (
         <Space>
           <PieChartOutlined />
-          <span>文件夹分析</span>
+          <span>{t('analysis.tabFolder')}</span>
         </Space>
       ),
       children: <FolderAnalysisTab />,
@@ -34,7 +36,7 @@ export const AIAnalysis: React.FC = () => {
       label: (
         <Space>
           <ClearOutlined />
-          <span>清理建议</span>
+          <span>{t('analysis.tabCleanup')}</span>
         </Space>
       ),
       children: <CleanupSuggestionTab />,
@@ -44,7 +46,7 @@ export const AIAnalysis: React.FC = () => {
       label: (
         <Space>
           <FileTextOutlined />
-          <span>文档助手</span>
+          <span>{t('analysis.tabDocument')}</span>
         </Space>
       ),
       children: <DocumentAssistantTab />,
@@ -66,7 +68,7 @@ export const AIAnalysis: React.FC = () => {
         <Space>
           <RobotOutlined style={{ fontSize: 24, color: colors.accentPurple }} />
           <Title level={4} style={{ margin: 0, color: colors.textPrimary }}>
-            AI 分析
+            {t('analysis.pageTitle')}
           </Title>
         </Space>
       </div>
@@ -75,7 +77,7 @@ export const AIAnalysis: React.FC = () => {
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         <Tabs
           activeKey={activeTab}
-          onChange={(key) => setActiveTab(key as any)}
+          onChange={(key) => setActiveTab(key as 'folder' | 'cleanup' | 'document')}
           items={tabItems}
           style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
           tabBarStyle={{

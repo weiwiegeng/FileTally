@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Input,
   Button,
@@ -40,16 +41,9 @@ import { useSearchStore, useSettingsStore, useRemoteStore, SearchMode } from '..
 import { useThemeColors } from '../../hooks';
 import { RemoteFolderSelector } from './RemoteFolderSelector';
 import { isRemotePath, getPathName } from '../../utils/format';
+import { mapBackendError } from '../../utils/backendError';
 
 const { Text } = Typography;
-
-const FILE_TYPE_OPTIONS = [
-  { label: '全部', value: '' },
-  { label: 'PDF 文档', value: 'pdf' },
-  { label: '文本文件', value: 'txt,md,json,xml,html,css,js,ts' },
-  { label: '代码文件', value: 'py,rs,go,java,c,cpp,h' },
-  { label: '配置文件', value: 'yaml,yml,toml,ini,conf' },
-];
 
 // 文件夹内容类型（匹配后端 FileNode snake_case 字段）
 interface FolderContent {
@@ -69,6 +63,17 @@ interface FolderContentCache {
 }
 
 export const SearchPanel: React.FC = () => {
+  const { t } = useTranslation();
+  const fileTypeOptions = useMemo(
+    () => [
+      { label: t('search.panel.fileTypeAll'), value: '' },
+      { label: t('search.panel.fileTypePdf'), value: 'pdf' },
+      { label: t('search.panel.fileTypeText'), value: 'txt,md,json,xml,html,css,js,ts' },
+      { label: t('search.panel.fileTypeCode'), value: 'py,rs,go,java,c,cpp,h' },
+      { label: t('search.panel.fileTypeConfig'), value: 'yaml,yml,toml,ini,conf' },
+    ],
+    [t]
+  );
   const {
     mode,
     query,
@@ -89,6 +94,7 @@ export const SearchPanel: React.FC = () => {
     setOptions,
     search,
     checkKeywords,
+    cancelSearch,
     clearResults,
   } = useSearchStore();
   const { settings } = useSettingsStore();
@@ -112,6 +118,8 @@ export const SearchPanel: React.FC = () => {
         search_filename: settings.defaultSearchFilename,
         case_sensitive: settings.defaultCaseSensitive,
         max_pdf_size_mb: settings.maxPdfSizeMB,
+        max_text_size_mb: settings.maxTextSizeMB,
+        max_concurrency: settings.maxConcurrentSearches,
       });
     }
   }, []);
@@ -121,43 +129,48 @@ export const SearchPanel: React.FC = () => {
       const selected = await open({
         directory: true,
         multiple: true,  // 支持多选
-        title: '选择搜索目录（可多选）',
+        title: t('search.panel.dialogSelectDirs'),
       });
       
       if (selected) {
         // selected 可能是单个字符串或数组
         const paths = Array.isArray(selected) ? selected : [selected];
+        // 追加模式：保留已有目录
+        const existing = new Set(useSearchStore.getState().searchPaths);
+        const newPaths = paths.filter((p) => !existing.has(p));
+        if (newPaths.length === 0) {
+          return;
+        }
+        newPaths.forEach((p) => addSearchPath(p));
         
-        // 替换模式：清空旧的，添加新的
-        setSearchPaths(paths);
-        setFolderContents({});
-        
-        // 设置所有路径为 loading 状态
-        setLoadingPaths(new Set(paths));
+        // 设置新增路径为 loading 状态
+        setLoadingPaths(new Set(newPaths));
         
         // 并行加载所有根目录，使用 Promise.all 等待全部完成
         const results = await Promise.all(
-          paths.map(async (path) => {
+          newPaths.map(async (path) => {
             try {
               const contents = await invoke<FolderContent[]>('scan_directory', { path });
               return { path, contents, success: true };
             } catch (err) {
-              console.error(`加载文件夹内容失败: ${path}`, err);
+              console.error(`load folder contents failed: ${path}`, err);
               return { path, contents: [], success: false };
             }
           })
         );
         
-        // 一次性更新所有结果
-        const newContents: FolderContentCache = {};
-        results.forEach(({ path, contents }) => {
-          newContents[path] = { loading: false, contents };
+        // 合并新增目录的缓存
+        setFolderContents((prev) => {
+          const next = { ...prev };
+          results.forEach(({ path, contents }) => {
+            next[path] = { loading: false, contents };
+          });
+          return next;
         });
-        setFolderContents(newContents);
         setLoadingPaths(new Set());
       }
     } catch (err) {
-      console.error('选择目录失败:', err);
+      console.error('select directory failed:', err);
     }
   };
 
@@ -183,7 +196,7 @@ export const SearchPanel: React.FC = () => {
         [folderPath]: { loading: false, contents }
       }));
     } catch (err) {
-      console.error('加载文件夹内容失败:', err);
+      console.error('load folder contents failed:', err);
       setFolderContents(prev => ({
         ...prev,
         [folderPath]: { loading: false, contents: [] }
@@ -215,7 +228,7 @@ export const SearchPanel: React.FC = () => {
             <span>{item.name}</span>
             {item.is_dir && item.children_count != null && item.children_count > 0 && (
               <Tag color="blue" style={{ fontSize: 10, marginLeft: 4 }}>
-                {item.children_count} 项
+                {t('search.panel.treeItemCount', { count: item.children_count })}
               </Tag>
             )}
           </Space>
@@ -274,7 +287,7 @@ export const SearchPanel: React.FC = () => {
   // 导出 Excel
   const handleExportExcel = async () => {
     if (keywordCheckResults.length === 0) {
-      message.warning('没有可导出的数据');
+      message.warning(t('search.panel.exportNoData'));
       return;
     }
 
@@ -282,16 +295,16 @@ export const SearchPanel: React.FC = () => {
     try {
       // 准备数据
       const exportData = keywordCheckResults.map(item => ({
-        '文件名': item.fileName,
-        '文件路径': item.filePath,
-        '文件类型': item.fileType,
-        '缺失关键词': item.missingKeywords.join(', '),
+        [t('search.panel.exportColFileName')]: item.fileName,
+        [t('search.panel.exportColFilePath')]: item.filePath,
+        [t('search.panel.exportColFileType')]: item.fileType,
+        [t('search.panel.exportColMissingKeywords')]: item.missingKeywords.join(', '),
       }));
 
       // 创建工作薄
       const ws = XLSX.utils.json_to_sheet(exportData);
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, '缺失关键词报告');
+      XLSX.utils.book_append_sheet(wb, ws, t('search.panel.exportSheetName'));
 
       // 设置列宽
       ws['!cols'] = [
@@ -306,17 +319,19 @@ export const SearchPanel: React.FC = () => {
 
       // 选择保存路径
       const savePath = await save({
-        defaultPath: `关键词检查报告_${new Date().toISOString().slice(0, 10)}.xlsx`,
+        defaultPath: t('search.panel.exportDefaultFileName', {
+          date: new Date().toISOString().slice(0, 10),
+        }),
         filters: [{ name: 'Excel', extensions: ['xlsx'] }],
       });
 
       if (savePath) {
         await writeFile(savePath, new Uint8Array(excelBuffer));
-        message.success('导出成功!');
+        message.success(t('search.panel.exportSuccess'));
       }
     } catch (err) {
-      console.error('导出失败:', err);
-      message.error('导出失败: ' + String(err));
+      console.error('export failed:', err);
+      message.error(t('search.panel.exportFailed', { error: mapBackendError(err) }));
     } finally {
       setExporting(false);
     }
@@ -338,8 +353,8 @@ export const SearchPanel: React.FC = () => {
             value={mode}
             onChange={(value) => setMode(value as SearchMode)}
             options={[
-              { label: '普通搜索', value: 'normal', icon: <SearchOutlined /> },
-              { label: '关键词检查', value: 'keyword-check', icon: <CheckCircleOutlined /> },
+              { label: t('search.panel.modeNormal'), value: 'normal', icon: <SearchOutlined /> },
+              { label: t('search.panel.modeKeywordCheck'), value: 'keyword-check', icon: <CheckCircleOutlined /> },
             ]}
           />
           {mode === 'keyword-check' && keywordCheckResults.length > 0 && (
@@ -349,7 +364,7 @@ export const SearchPanel: React.FC = () => {
               onClick={handleExportExcel}
               loading={exporting}
             >
-              导出 Excel
+              {t('search.panel.exportExcel')}
             </Button>
           )}
         </div>
@@ -360,13 +375,13 @@ export const SearchPanel: React.FC = () => {
               items: [
                 {
                   key: 'local',
-                  label: '本地目录',
+                  label: t('search.panel.addDirLocal'),
                   icon: <FolderOpenOutlined />,
                   onClick: handleSelectFolder,
                 },
                 {
                   key: 'remote',
-                  label: '远程目录',
+                  label: t('search.panel.addDirRemote'),
                   icon: <CloudServerOutlined />,
                   onClick: () => setShowRemoteSelector(true),
                   disabled: connections.length === 0,
@@ -377,7 +392,7 @@ export const SearchPanel: React.FC = () => {
             <Button style={{ minWidth: 160 }}>
               <Space>
                 <PlusOutlined />
-                <span>添加目录</span>
+                <span>{t('search.panel.addDir')}</span>
                 {searchPaths.length > 0 && (
                   <Badge count={searchPaths.length} style={{ marginLeft: 4 }} />
                 )}
@@ -387,9 +402,10 @@ export const SearchPanel: React.FC = () => {
           </Dropdown>
           
           <Input
-            placeholder={mode === 'normal' 
-              ? "输入搜索关键词（支持文件名和文件内容搜索）" 
-              : "输入多个关键词（逗号分隔，如: 招标,供应商,合同）"
+            placeholder={
+              mode === 'normal'
+                ? t('search.panel.placeholderNormal')
+                : t('search.panel.placeholderKeyword')
             }
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -404,12 +420,18 @@ export const SearchPanel: React.FC = () => {
             icon={mode === 'normal' ? <SearchOutlined /> : <CheckCircleOutlined />}
             onClick={handleSearch}
             loading={loading}
-            disabled={!query.trim() || searchPaths.length === 0}
+            disabled={loading || !query.trim() || searchPaths.length === 0}
           >
-            {mode === 'normal' ? '搜索' : '检查'}
+            {mode === 'normal' ? t('search.panel.actionSearch') : t('search.panel.actionCheck')}
           </Button>
+
+          {loading && (
+            <Button danger onClick={() => cancelSearch()}>
+              {t('search.panel.cancel')}
+            </Button>
+          )}
           
-          <Tooltip title="搜索选项">
+          <Tooltip title={t('search.panel.tooltipOptions')}>
             <Button
               icon={<SettingOutlined />}
               onClick={() => setShowOptions(!showOptions)}
@@ -417,7 +439,7 @@ export const SearchPanel: React.FC = () => {
             />
           </Tooltip>
           
-          <Tooltip title="清空结果">
+          <Tooltip title={t('search.panel.tooltipClearResults')}>
             <Button
               icon={<ClearOutlined />}
               onClick={clearResults}
@@ -440,7 +462,7 @@ export const SearchPanel: React.FC = () => {
           >
             <Space>
               <FileTextOutlined style={{ color: colors.accentBlue }} />
-              <Text type="secondary">搜索内容:</Text>
+              <Text type="secondary">{t('search.panel.optionSearchContent')}</Text>
               <Switch
                 checked={options.search_content}
                 onChange={(checked) => setOptions({ search_content: checked })}
@@ -449,7 +471,7 @@ export const SearchPanel: React.FC = () => {
             </Space>
             
             <Space>
-              <Text type="secondary">搜索文件名:</Text>
+              <Text type="secondary">{t('search.panel.optionSearchFilename')}</Text>
               <Switch
                 checked={options.search_filename}
                 onChange={(checked) => setOptions({ search_filename: checked })}
@@ -458,7 +480,7 @@ export const SearchPanel: React.FC = () => {
             </Space>
             
             <Space>
-              <Text type="secondary">区分大小写:</Text>
+              <Text type="secondary">{t('search.panel.optionCaseSensitive')}</Text>
               <Switch
                 checked={options.case_sensitive}
                 onChange={(checked) => setOptions({ case_sensitive: checked })}
@@ -467,7 +489,7 @@ export const SearchPanel: React.FC = () => {
             </Space>
             
             <Space>
-              <Text type="secondary">包含隐藏文件:</Text>
+              <Text type="secondary">{t('search.panel.optionHiddenFiles')}</Text>
               <Switch
                 checked={options.include_hidden}
                 onChange={(checked) => setOptions({ include_hidden: checked })}
@@ -476,14 +498,14 @@ export const SearchPanel: React.FC = () => {
             </Space>
             
             <Space>
-              <Text type="secondary">文件类型:</Text>
+              <Text type="secondary">{t('search.panel.optionFileType')}</Text>
               <Select
                 value={selectedFileTypes}
                 onChange={setSelectedFileTypes}
                 style={{ minWidth: 140 }}
                 size="small"
-                options={FILE_TYPE_OPTIONS}
-                placeholder="选择类型"
+                options={fileTypeOptions}
+                placeholder={t('search.panel.placeholderSelectType')}
               />
             </Space>
           </div>
@@ -499,7 +521,7 @@ export const SearchPanel: React.FC = () => {
               overflowCount={9999}
             >
               <Text type="secondary" style={{ paddingRight: 8 }}>
-                扫描文件
+                {t('search.panel.statScannedFiles')}
               </Text>
             </Badge>
             <Badge
@@ -509,7 +531,9 @@ export const SearchPanel: React.FC = () => {
               overflowCount={999}
             >
               <Text type="secondary" style={{ paddingRight: 8 }}>
-                {mode === 'normal' ? '匹配文件' : '完全匹配'}
+                {mode === 'normal'
+                  ? t('search.panel.statMatchedNormal')
+                  : t('search.panel.statMatchedKeyword')}
               </Text>
             </Badge>
             <Badge
@@ -519,7 +543,9 @@ export const SearchPanel: React.FC = () => {
               overflowCount={999}
             >
               <Text type="secondary" style={{ paddingRight: 8 }}>
-                {mode === 'normal' ? '未匹配' : '缺失关键词'}
+                {mode === 'normal'
+                  ? t('search.panel.statUnmatchedNormal')
+                  : t('search.panel.statUnmatchedKeyword')}
               </Text>
             </Badge>
             {mode === 'normal' && (
@@ -530,18 +556,18 @@ export const SearchPanel: React.FC = () => {
                 overflowCount={9999}
               >
                 <Text type="secondary" style={{ paddingRight: 8 }}>
-                  匹配总数
+                  {t('search.panel.statTotalMatches')}
                 </Text>
               </Badge>
             )}
             {mode === 'keyword-check' && keywordCheckKeywords.length > 0 && (
               <Text type="secondary">
-                检查关键词: {keywordCheckKeywords.join(', ')}
+                {t('search.panel.statKeywords', { keywords: keywordCheckKeywords.join(', ') })}
               </Text>
             )}
             {searchPaths.length > 0 && (
               <Text type="secondary" ellipsis style={{ maxWidth: 300 }}>
-                搜索路径: {searchPaths.length} 个目录
+                {t('search.panel.statPaths', { count: searchPaths.length })}
               </Text>
             )}
           </div>
@@ -560,7 +586,9 @@ export const SearchPanel: React.FC = () => {
           >
             {/* 标题栏：显示数量 + 清空按钮 */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <Text type="secondary">已选 {searchPaths.length} 个目录</Text>
+              <Text type="secondary">
+                {t('search.panel.selectedDirs', { count: searchPaths.length })}
+              </Text>
               <Button
                 type="link"
                 size="small"
@@ -570,7 +598,7 @@ export const SearchPanel: React.FC = () => {
                   setFolderContents({});
                 }}
               >
-                清空全部
+                {t('search.panel.clearAll')}
               </Button>
             </div>
             
@@ -597,7 +625,7 @@ export const SearchPanel: React.FC = () => {
                   <Text style={{ flex: 1 }} ellipsis title={rootPath}>
                     {getPathName(rootPath)}
                   </Text>
-                  <Tooltip title="移除">
+                  <Tooltip title={t('search.panel.tooltipRemove')}>
                     <Button
                       type="text"
                       size="small"
@@ -622,11 +650,13 @@ export const SearchPanel: React.FC = () => {
                 {loadingPaths.has(rootPath) ? (
                   <div style={{ textAlign: 'center', padding: 16 }}>
                     <Spin size="small" />
-                    <Text type="secondary" style={{ marginLeft: 8 }}>加载中...</Text>
+                    <Text type="secondary" style={{ marginLeft: 8 }}>
+                      {t('search.panel.treeLoading')}
+                    </Text>
                   </div>
                 ) : buildTreeData(rootPath).length === 0 ? (
                   <Text type="secondary" style={{ padding: '8px 24px', display: 'block' }}>
-                    空文件夹
+                    {t('search.panel.treeEmpty')}
                   </Text>
                 ) : (
                   <Tree
@@ -654,9 +684,7 @@ export const SearchPanel: React.FC = () => {
         open={showRemoteSelector}
         onClose={() => setShowRemoteSelector(false)}
         onSelect={(path) => {
-          // 替换模式
-          setSearchPaths([path]);
-          setFolderContents({});
+          addSearchPath(path);
           loadFolderContents(path);
         }}
       />

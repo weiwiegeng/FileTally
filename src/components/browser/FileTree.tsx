@@ -1,15 +1,18 @@
 import React from 'react';
 import { Empty, Spin, Typography, Divider } from 'antd';
 import { FolderOpenOutlined, CloudServerOutlined } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import { FileTreeNode } from './FileTreeNode';
 import { useFileStore } from '../../stores';
 import { useThemeColors } from '../../hooks';
 import { isRemotePath } from '../../utils/format';
+import { sortFileNodes } from '../../utils/sortFiles';
 
 const { Text } = Typography;
 
 export const FileTree: React.FC = () => {
-  const { currentPaths, nodesMap, loading, loadingPaths, showHidden } = useFileStore();
+  const { t } = useTranslation();
+  const { currentPaths, nodesMap, loading, loadingPaths, showHidden, sortField, sortOrder } = useFileStore();
   const colors = useThemeColors();
 
   // 获取文件夹名称
@@ -21,7 +24,7 @@ export const FileTree: React.FC = () => {
   if (loading && currentPaths.length === 0) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
-        <Spin tip="加载中..." />
+        <Spin tip={t('browser.fileTree.loading')} />
       </div>
     );
   }
@@ -29,7 +32,7 @@ export const FileTree: React.FC = () => {
   if (currentPaths.length === 0) {
     return (
       <Empty
-        description="请选择文件夹"
+        description={t('browser.fileTree.selectFolderFirst')}
         style={{ padding: 40 }}
         image={Empty.PRESENTED_IMAGE_SIMPLE}
       />
@@ -43,9 +46,10 @@ export const FileTree: React.FC = () => {
         const isLoading = loadingPaths.has(rootPath);
         const isRemote = isRemotePath(rootPath);
         
-        const filteredNodes = showHidden
+        const visibleNodes = showHidden
           ? nodes
           : nodes.filter((node) => !node.is_hidden);
+        const filteredNodes = sortFileNodes(visibleNodes, sortField, sortOrder);
 
         return (
           <div key={rootPath}>
@@ -79,7 +83,7 @@ export const FileTree: React.FC = () => {
               </div>
             ) : filteredNodes.length === 0 ? (
               <div style={{ padding: '12px 24px', color: colors.textSecondary }}>
-                空文件夹
+                {t('browser.fileTree.emptyFolder')}
               </div>
             ) : (
               <div style={{ marginBottom: 8 }}>

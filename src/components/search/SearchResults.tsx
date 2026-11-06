@@ -26,8 +26,8 @@ import {
   CloseCircleOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import { useSearchStore, SearchResult, SearchMatch, UnmatchedFile, KeywordCheckResult } from '../../stores';
-import { useThemeColors } from '../../hooks';
 
 const { Text, Paragraph } = Typography;
 
@@ -98,8 +98,9 @@ const HighlightText: React.FC<{
 
 // 单个匹配项
 const MatchItem: React.FC<{ match: SearchMatch; query: string }> = ({ match, query }) => {
+  const { t } = useTranslation();
   const isFilenameMatch = match.lineNumber === 0;
-  
+
   return (
     <div
       style={{
@@ -112,9 +113,11 @@ const MatchItem: React.FC<{ match: SearchMatch; query: string }> = ({ match, que
     >
       <Space size="small">
         {isFilenameMatch ? (
-          <Tag color="green" icon={<FolderOutlined />}>文件名</Tag>
+          <Tag color="green" icon={<FolderOutlined />}>
+            {t('search.results.tagFilename')}
+          </Tag>
         ) : (
-          <Tag color="blue">行 {match.lineNumber}</Tag>
+          <Tag color="blue">{t('search.results.tagLine', { lineNumber: match.lineNumber })}</Tag>
         )}
         <HighlightText
           content={match.content}
@@ -129,6 +132,7 @@ const MatchItem: React.FC<{ match: SearchMatch; query: string }> = ({ match, que
 
 // 搜索结果项
 const SearchResultItem: React.FC<{ result: SearchResult; query: string }> = ({ result, query }) => {
+  const { t } = useTranslation();
   // 分离文件名匹配和内容匹配
   const filenameMatches = result.matches.filter(m => m.lineNumber === 0);
   const contentMatches = result.matches.filter(m => m.lineNumber !== 0);
@@ -147,14 +151,16 @@ const SearchResultItem: React.FC<{ result: SearchResult; query: string }> = ({ r
                   <Text strong ellipsis style={{ maxWidth: 300 }}>
                     {result.fileName}
                   </Text>
-                  <Tag color="purple">{result.matchCount} 处匹配</Tag>
+                  <Tag color="purple">
+                    {t('search.results.matchCount', { count: result.matchCount })}
+                  </Tag>
                   {filenameMatches.length > 0 && (
-                    <Tooltip title="文件名匹配">
+                    <Tooltip title={t('search.results.tooltipFilenameMatch')}>
                       <CheckCircleOutlined style={{ color: '#52c41a' }} />
                     </Tooltip>
                   )}
                   {contentMatches.length > 0 && (
-                    <Tooltip title="内容匹配">
+                    <Tooltip title={t('search.results.tooltipContentMatch')}>
                       <InfoCircleOutlined style={{ color: '#1890ff' }} />
                     </Tooltip>
                   )}
@@ -184,11 +190,12 @@ const SearchResultItem: React.FC<{ result: SearchResult; query: string }> = ({ r
 
 // 未匹配文件列表组件
 const UnmatchedFileList: React.FC<{ files: UnmatchedFile[] }> = ({ files }) => {
+  const { t } = useTranslation();
   if (files.length === 0) {
     return (
       <Empty
         image={Empty.PRESENTED_IMAGE_SIMPLE}
-        description="所有扫描的文件都匹配到了关键词"
+        description={t('search.results.unmatchedAllMatched')}
         style={{ padding: 40 }}
       />
     );
@@ -221,7 +228,7 @@ const UnmatchedFileList: React.FC<{ files: UnmatchedFile[] }> = ({ files }) => {
             </div>
           </Space>
           <Tag color="red" icon={<CloseCircleOutlined />}>
-            未匹配
+            {t('search.results.tagUnmatched')}
           </Tag>
         </List.Item>
       )}
@@ -230,14 +237,21 @@ const UnmatchedFileList: React.FC<{ files: UnmatchedFile[] }> = ({ files }) => {
 };
 
 // 关键词检查结果列表
-const KeywordCheckResultList: React.FC<{ results: KeywordCheckResult[] }> = ({ results }) => {
-  const colors = useThemeColors();
-  
+const KeywordCheckResultList: React.FC<{
+  results: KeywordCheckResult[];
+  incomplete?: boolean;
+}> = ({ results, incomplete }) => {
+  const { t } = useTranslation();
+
   if (results.length === 0) {
     return (
       <Empty
         image={Empty.PRESENTED_IMAGE_SIMPLE}
-        description="所有文件都包含所有关键词"
+        description={
+          incomplete
+            ? t('search.results.keywordCheckIncomplete')
+            : t('search.results.keywordAllPresent')
+        }
         style={{ padding: 40 }}
       />
     );
@@ -245,7 +259,7 @@ const KeywordCheckResultList: React.FC<{ results: KeywordCheckResult[] }> = ({ r
 
   const columns = [
     {
-      title: '文件名',
+      title: t('search.results.colFileName'),
       dataIndex: 'fileName',
       key: 'fileName',
       width: 250,
@@ -260,7 +274,7 @@ const KeywordCheckResultList: React.FC<{ results: KeywordCheckResult[] }> = ({ r
       ),
     },
     {
-      title: '文件路径',
+      title: t('search.results.colFilePath'),
       dataIndex: 'filePath',
       key: 'filePath',
       ellipsis: true,
@@ -271,7 +285,7 @@ const KeywordCheckResultList: React.FC<{ results: KeywordCheckResult[] }> = ({ r
       ),
     },
     {
-      title: '缺失关键词',
+      title: t('search.results.colMissingKeywords'),
       dataIndex: 'missingKeywords',
       key: 'missingKeywords',
       width: 300,
@@ -300,7 +314,20 @@ const KeywordCheckResultList: React.FC<{ results: KeywordCheckResult[] }> = ({ r
 };
 
 export const SearchResults: React.FC = () => {
-  const { mode, results, unmatchedFiles, keywordCheckResults, loading, error, query, matchedFiles, unmatchedCount } = useSearchStore();
+  const { t } = useTranslation();
+  const {
+    mode,
+    results,
+    unmatchedFiles,
+    keywordCheckResults,
+    loading,
+    error,
+    statusKind,
+    truncated,
+    query,
+    matchedFiles,
+    unmatchedCount,
+  } = useSearchStore();
   const [activeTab, setActiveTab] = useState('matched');
 
   if (loading) {
@@ -316,36 +343,56 @@ export const SearchResults: React.FC = () => {
         }}
       >
         <Spin size="large" />
-        <Text type="secondary">正在搜索文件内容...</Text>
+        <Text type="secondary">{t('search.results.loadingPrimary')}</Text>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          搜索 PDF 等大文件可能需要一些时间
+          {t('search.results.loadingHint')}
         </Text>
       </div>
     );
   }
 
-  if (error) {
+  const hasNormalResults = results.length > 0 || unmatchedFiles.length > 0;
+  const hasKeywordResults = keywordCheckResults.length > 0 || matchedFiles > 0;
+  const hasResults = mode === 'keyword-check' ? hasKeywordResults : hasNormalResults;
+  const isSoftStatus =
+    statusKind === 'cancelled' || statusKind === 'timeout' || statusKind === 'truncated';
+  const statusTitle =
+    statusKind === 'cancelled'
+      ? t('search.results.cancelledTitle')
+      : statusKind === 'timeout'
+        ? t('search.results.timeoutTitle')
+        : hasResults || isSoftStatus
+          ? t('search.results.statusWarningTitle')
+          : t('search.results.errorTitle');
+  const statusBanner =
+    error || truncated ? (
+      <Alert
+        type={hasResults || isSoftStatus ? 'warning' : 'error'}
+        message={statusTitle}
+        description={error || t('search.store.truncatedHint')}
+        showIcon
+        style={{ marginBottom: 16 }}
+      />
+    ) : null;
+
+  // Soft cancel/timeout/truncated with no rows — still show banner (not "failed")
+  if (error && !hasResults) {
     return (
       <div style={{ padding: 24 }}>
-        <Alert
-          type="error"
-          message="搜索失败"
-          description={error}
-          showIcon
-        />
+        {statusBanner}
       </div>
     );
   }
 
-  if (mode === 'normal' && results.length === 0 && unmatchedFiles.length === 0) {
+  if (mode === 'normal' && results.length === 0 && unmatchedFiles.length === 0 && !error && !truncated) {
     return (
       <Empty
         image={Empty.PRESENTED_IMAGE_SIMPLE}
         description={
           <Space direction="vertical" align="center">
-            <Text type="secondary">输入关键词开始搜索</Text>
+            <Text type="secondary">{t('search.results.emptyNormalTitle')}</Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              支持搜索文件名和文件内容（文本文件、PDF）
+              {t('search.results.emptyNormalHint')}
             </Text>
           </Space>
         }
@@ -354,15 +401,15 @@ export const SearchResults: React.FC = () => {
     );
   }
   
-  if (mode === 'keyword-check' && keywordCheckResults.length === 0 && matchedFiles === 0) {
+  if (mode === 'keyword-check' && keywordCheckResults.length === 0 && matchedFiles === 0 && !error && !truncated) {
     return (
       <Empty
         image={Empty.PRESENTED_IMAGE_SIMPLE}
         description={
           <Space direction="vertical" align="center">
-            <Text type="secondary">输入多个关键词开始检查</Text>
+            <Text type="secondary">{t('search.results.emptyKeywordTitle')}</Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              用逗号分隔多个关键词，检查文件是否缺失关键词
+              {t('search.results.emptyKeywordHint')}
             </Text>
           </Space>
         }
@@ -375,7 +422,11 @@ export const SearchResults: React.FC = () => {
   if (mode === 'keyword-check') {
     return (
       <div style={{ height: '100%', padding: '16px 24px' }}>
-        <KeywordCheckResultList results={keywordCheckResults} />
+        {statusBanner}
+        <KeywordCheckResultList
+          results={keywordCheckResults}
+          incomplete={isSoftStatus}
+        />
       </div>
     );
   }
@@ -385,7 +436,7 @@ export const SearchResults: React.FC = () => {
       key: 'matched',
       label: (
         <Badge count={matchedFiles} offset={[10, 0]} color="#52c41a">
-          <span style={{ paddingRight: 16 }}>匹配文件</span>
+          <span style={{ paddingRight: 16 }}>{t('search.results.tabMatched')}</span>
         </Badge>
       ),
       children: (
@@ -395,9 +446,9 @@ export const SearchResults: React.FC = () => {
               image={Empty.PRESENTED_IMAGE_SIMPLE}
               description={
                 <Space direction="vertical" align="center">
-                  <Text type="secondary">未找到匹配的文件</Text>
+                  <Text type="secondary">{t('search.results.noMatchTitle')}</Text>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    关键词 "{query}" 在选定目录中没有找到匹配结果
+                    {t('search.results.noMatchHint', { query })}
                   </Text>
                 </Space>
               }
@@ -422,7 +473,7 @@ export const SearchResults: React.FC = () => {
       key: 'unmatched',
       label: (
         <Badge count={unmatchedCount} offset={[10, 0]} color="#ff4d4f">
-          <span style={{ paddingRight: 16 }}>未匹配文件</span>
+          <span style={{ paddingRight: 16 }}>{t('search.results.tabUnmatched')}</span>
         </Badge>
       ),
       children: (
@@ -435,6 +486,7 @@ export const SearchResults: React.FC = () => {
 
   return (
     <div style={{ height: '100%' }}>
+      {statusBanner && <div style={{ padding: '16px 24px 0' }}>{statusBanner}</div>}
       <Tabs
         activeKey={activeTab}
         onChange={setActiveTab}

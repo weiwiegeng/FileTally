@@ -1,9 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Typography, Descriptions, Empty, Spin, Tag, Input, Button, message, Tooltip, List } from 'antd';
+import { useTranslation } from 'react-i18next';
 import { EditOutlined, CheckOutlined, CloseOutlined, FolderOutlined, FileOutlined } from '@ant-design/icons';
 import { FileIcon } from './FileIcon';
 import { useFileStore } from '../../stores';
 import { useThemeColors } from '../../hooks';
+import { mapBackendError } from '../../utils/backendError';
 import {
   PdfPreview,
   ExcelPreview,
@@ -50,6 +52,7 @@ const getPreviewType = (extension: string): string => {
 };
 
 export const FilePreview: React.FC = () => {
+  const { t } = useTranslation();
   const { selectedFile, previewInfo, previewLoading, renameFile } = useFileStore();
   const colors = useThemeColors();
   
@@ -111,10 +114,10 @@ export const FilePreview: React.FC = () => {
     setRenaming(false);
 
     if (result.success) {
-      message.success('重命名成功');
+      message.success(t('browser.filePreview.renameSuccess'));
       setIsEditing(false);
     } else {
-      message.error(result.error || '重命名失败');
+      message.error(result.error ? mapBackendError(result.error) : t('browser.filePreview.renameFailed'));
     }
   };
 
@@ -139,7 +142,7 @@ export const FilePreview: React.FC = () => {
         }}
       >
         <Empty
-          description="选择文件查看详情"
+          description={t('browser.filePreview.selectFileHint')}
           image={Empty.PRESENTED_IMAGE_SIMPLE}
         />
       </div>
@@ -156,7 +159,7 @@ export const FilePreview: React.FC = () => {
           height: '100%',
         }}
       >
-        <Spin tip="加载预览..." />
+        <Spin tip={t('browser.filePreview.loadingPreview')} />
       </div>
     );
   }
@@ -186,7 +189,7 @@ export const FilePreview: React.FC = () => {
             }}
           >
             <FileIcon isDir={true} extension="" size={48} isOpen={true} />
-            <div style={{ marginTop: 16, color: colors.textSecondary }}>空文件夹</div>
+            <div style={{ marginTop: 16, color: colors.textSecondary }}>{t('browser.filePreview.emptyFolder')}</div>
           </div>
         );
       }
@@ -284,10 +287,10 @@ export const FilePreview: React.FC = () => {
             <FileIcon isDir={true} extension="" size={24} isOpen={true} />
             <div>
               <Text style={{ color: colors.textPrimary }}>
-                共 {children.length} 个项目
+                {t('browser.filePreview.itemSummary', { total: children.length })}
               </Text>
               <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
-                ({folders.length} 个文件夹, {files.length} 个文件)
+                {t('browser.filePreview.folderFileBreakdown', { folders: folders.length, files: files.length })}
               </Text>
             </div>
           </div>
@@ -333,7 +336,7 @@ export const FilePreview: React.FC = () => {
                   {/* 如果是文件夹且有子内容，显示数量 */}
                   {item.is_dir && item.children_count !== null && item.children_count > 0 && (
                     <Tag color="blue" style={{ marginRight: 0 }}>
-                      {item.children_count} 项
+                      {t('browser.filePreview.childrenCount', { count: item.children_count })}
                     </Tag>
                   )}
                   {/* 文件显示大小 */}
@@ -399,10 +402,12 @@ export const FilePreview: React.FC = () => {
               size={64}
             />
             <div style={{ marginTop: 20, color: colors.textSecondary }}>
-              不支持预览此文件格式
+              {t('browser.filePreview.unsupportedFormat')}
             </div>
             <div style={{ marginTop: 8, color: colors.textSecondary, fontSize: 12 }}>
-              {selectedFile.extension.toUpperCase() || '未知'} 格式
+              {t('browser.filePreview.formatLabel', {
+                ext: selectedFile.extension.toUpperCase() || t('browser.filePreview.unknown'),
+              })}
             </div>
           </div>
         );
@@ -473,7 +478,7 @@ export const FilePreview: React.FC = () => {
               >
                 {selectedFile.name}
               </Text>
-              <Tooltip title="重命名">
+              <Tooltip title={t('browser.filePreview.tooltipRename')}>
                 <Button
                   type="text"
                   size="small"
@@ -510,25 +515,25 @@ export const FilePreview: React.FC = () => {
           size="small"
           style={{ marginTop: 20 }}
         >
-          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>大小</Text>}>
+          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>{t('browser.filePreview.metaSize')}</Text>}>
             <Text style={{ color: colors.textPrimary }}>
               {previewInfo.metadata.size_formatted || '-'}
             </Text>
           </Descriptions.Item>
-          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>类型</Text>}>
-            <Tag color="blue">{previewInfo.metadata.extension || '未知'}</Tag>
+          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>{t('browser.filePreview.metaType')}</Text>}>
+            <Tag color="blue">{previewInfo.metadata.extension || t('browser.filePreview.unknown')}</Tag>
           </Descriptions.Item>
-          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>MIME 类型</Text>}>
+          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>{t('browser.filePreview.metaMime')}</Text>}>
             <Text style={{ color: colors.textPrimary }}>
               {previewInfo.metadata.mime_type || '-'}
             </Text>
           </Descriptions.Item>
-          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>修改时间</Text>}>
+          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>{t('browser.filePreview.metaModified')}</Text>}>
             <Text style={{ color: colors.textPrimary }}>
               {previewInfo.metadata.modified_time || '-'}
             </Text>
           </Descriptions.Item>
-          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>创建时间</Text>}>
+          <Descriptions.Item label={<Text style={{ color: colors.textSecondary }}>{t('browser.filePreview.metaCreated')}</Text>}>
             <Text style={{ color: colors.textPrimary }}>
               {previewInfo.metadata.created_time || '-'}
             </Text>

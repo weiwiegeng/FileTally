@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { Typography, Space, Button, Modal, Tabs } from 'antd';
+import { Typography, Space, Button, Modal } from 'antd';
 import {
   CloudServerOutlined,
   PlusOutlined,
 } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import { ConnectionForm } from './ConnectionForm';
 import { ConnectionList } from './ConnectionList';
 import { RemoteConnection } from '../../stores';
@@ -12,6 +13,7 @@ import { useThemeColors } from '../../hooks';
 const { Title, Text } = Typography;
 
 export const RemoteConnect: React.FC = () => {
+  const { t } = useTranslation();
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingConnection, setEditingConnection] = useState<RemoteConnection | undefined>();
   const colors = useThemeColors();
@@ -41,7 +43,7 @@ export const RemoteConnect: React.FC = () => {
         <Space>
           <CloudServerOutlined style={{ fontSize: 24, color: colors.accentPurple }} />
           <Title level={4} style={{ margin: 0, color: colors.textPrimary }}>
-            远程连接
+            {t('remote.connect.title')}
           </Title>
         </Space>
         <Button
@@ -49,7 +51,7 @@ export const RemoteConnect: React.FC = () => {
           icon={<PlusOutlined />}
           onClick={() => setShowAddModal(true)}
         >
-          添加连接
+          {t('remote.connect.addConnection')}
         </Button>
       </div>
 
@@ -61,9 +63,11 @@ export const RemoteConnect: React.FC = () => {
           borderBottom: `1px solid ${colors.border}`,
         }}
       >
-        <Text type="secondary" style={{ fontSize: 13 }}>
-          支持连接 SMB/CIFS 网络共享（如 NAS、Windows 共享文件夹）。
-          点击连接后会调用系统网络功能，请在弹出的对话框中输入用户名和密码。
+        <Text type="secondary" style={{ fontSize: 13, display: 'block' }}>
+          {t('remote.connect.infoLine1')}
+        </Text>
+        <Text type="secondary" style={{ fontSize: 13, display: 'block' }}>
+          {t('remote.connect.infoLine2')}
         </Text>
       </div>
 
@@ -76,7 +80,7 @@ export const RemoteConnect: React.FC = () => {
 
       {/* 添加/编辑连接对话框 */}
       <Modal
-        title={editingConnection ? '编辑连接' : '添加新连接'}
+        title={editingConnection ? t('remote.connect.modalEdit') : t('remote.connect.modalAdd')}
         open={showAddModal}
         onCancel={handleModalClose}
         footer={null}

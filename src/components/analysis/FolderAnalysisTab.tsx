@@ -14,7 +14,9 @@ import {
   Tooltip,
   Tag,
   Dropdown,
+  message,
 } from 'antd';
+import { mapBackendError } from '../../utils/backendError';
 import {
   FolderOpenOutlined,
   FileOutlined,
@@ -31,6 +33,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { useAnalysisStore, useRemoteStore, FolderAnalysisResult } from '../../stores';
 import { useThemeColors } from '../../hooks';
+import { useTranslation } from 'react-i18next';
 import { RemoteFolderSelector } from '../search/RemoteFolderSelector';
 import { isRemotePath, getPathName } from '../../utils/format';
 
@@ -56,6 +59,7 @@ export const FolderAnalysisTab: React.FC = () => {
   } = useAnalysisStore();
   const { connections } = useRemoteStore();
   const colors = useThemeColors();
+  const { t } = useTranslation();
   const [showRemoteSelector, setShowRemoteSelector] = useState(false);
   const [progress, setProgress] = useState<AnalysisProgress | null>(null);
 
@@ -65,7 +69,12 @@ export const FolderAnalysisTab: React.FC = () => {
     
     const setupListener = async () => {
       unlisten = await listen<AnalysisProgress>('analysis-progress', (event) => {
-        setProgress(event.payload);
+        const payload = event.payload;
+        const stageKey = `progress.${payload.stage}`;
+        setProgress({
+          ...payload,
+          message: t(stageKey, { defaultValue: payload.message }),
+        });
       });
     };
     
@@ -76,21 +85,21 @@ export const FolderAnalysisTab: React.FC = () => {
         unlisten();
       }
     };
-  }, []);
+  }, [t]);
 
   const handleSelectFolder = async () => {
     try {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: '选择要分析的文件夹',
+        title: t('analysis.folder.dialogSelectFolder'),
       });
       
       if (selected) {
         setFolderAnalysisPath(selected as string);
       }
     } catch (err) {
-      console.error('选择目录失败:', err);
+      console.error('select directory failed:', err);
     }
   };
 
@@ -107,17 +116,21 @@ export const FolderAnalysisTab: React.FC = () => {
       });
       analyzeFolderSuccess(result);
       setProgress(null);
+      if (result.truncated) {
+        message.warning(t('analysis.folder.truncatedWarning'));
+      }
     } catch (err) {
-      console.error('分析失败:', err);
+      console.error('analyze failed:', err);
       analyzeFolderError();
       setProgress(null);
+      message.error(t('analysis.folder.analyzeFailed', { error: mapBackendError(err) }));
     }
   };
 
   // 类型分布表格列
   const typeColumns = [
     {
-      title: '文件类型',
+      title: t('analysis.folder.colFileType'),
       dataIndex: 'extension',
       key: 'extension',
       render: (ext: string) => (
@@ -125,13 +138,13 @@ export const FolderAnalysisTab: React.FC = () => {
       ),
     },
     {
-      title: '文件数量',
+      title: t('analysis.folder.colFileCount'),
       dataIndex: 'count',
       key: 'count',
       sorter: (a: any, b: any) => a.count - b.count,
     },
     {
-      title: '占用空间',
+      title: t('analysis.folder.colSpaceUsed'),
       dataIndex: 'totalSize',
       key: 'totalSize',
       render: (size: number) => formatSize(size),
@@ -142,7 +155,7 @@ export const FolderAnalysisTab: React.FC = () => {
   // 大文件表格列
   const largeFileColumns = [
     {
-      title: '文件名',
+      title: t('analysis.folder.colFileName'),
       dataIndex: 'name',
       key: 'name',
       ellipsis: true,
@@ -153,7 +166,7 @@ export const FolderAnalysisTab: React.FC = () => {
       ),
     },
     {
-      title: '大小',
+      title: t('analysis.folder.colSize'),
       dataIndex: 'sizeFormatted',
       key: 'size',
     },
@@ -162,20 +175,20 @@ export const FolderAnalysisTab: React.FC = () => {
   // 重复文件表格列
   const duplicateColumns = [
     {
-      title: '文件大小',
+      title: t('analysis.folder.colDuplicateSize'),
       dataIndex: 'sizeFormatted',
       key: 'size',
     },
     {
-      title: '重复数量',
+      title: t('analysis.folder.colDuplicateCount'),
       dataIndex: 'files',
       key: 'count',
       render: (files: string[]) => (
-        <Tag color="orange">{files.length} 份</Tag>
+        <Tag color="orange">{t('analysis.folder.duplicateCountTag', { count: files.length })}</Tag>
       ),
     },
     {
-      title: '可释放空间',
+      title: t('analysis.folder.colReclaimable'),
       key: 'waste',
       render: (_: any, record: any) => (
         <Text type="danger">
@@ -188,7 +201,7 @@ export const FolderAnalysisTab: React.FC = () => {
   // 旧文件表格列
   const oldFileColumns = [
     {
-      title: '文件名',
+      title: t('analysis.folder.colFileName'),
       dataIndex: 'name',
       key: 'name',
       ellipsis: true,
@@ -199,17 +212,20 @@ export const FolderAnalysisTab: React.FC = () => {
       ),
     },
     {
-      title: '大小',
+      title: t('analysis.folder.colSize'),
       dataIndex: 'sizeFormatted',
       key: 'size',
     },
     {
-      title: '未修改天数',
-      dataIndex: 'lastAccessedDays',
+      title: t('analysis.folder.colDaysUnmodified'),
+      dataIndex: 'lastModifiedDays',
       key: 'days',
-      render: (days: number) => (
-        <Tag color={days > 365 ? 'red' : 'orange'}>{days} 天</Tag>
-      ),
+      render: (days: number, record: { lastModifiedDays?: number; lastAccessedDays?: number }) => {
+        const value = days ?? record.lastModifiedDays ?? record.lastAccessedDays ?? 0;
+        return (
+          <Tag color={value > 365 ? 'red' : 'orange'}>{t('analysis.folder.daysTag', { days: value })}</Tag>
+        );
+      },
     },
   ];
 
@@ -233,13 +249,13 @@ export const FolderAnalysisTab: React.FC = () => {
             items: [
               {
                 key: 'local',
-                label: '本地文件夹',
+                label: t('analysis.folder.localFolder'),
                 icon: <FolderOpenOutlined />,
                 onClick: handleSelectFolder,
               },
               {
                 key: 'remote',
-                label: '远程文件夹',
+                label: t('analysis.folder.remoteFolder'),
                 icon: <CloudServerOutlined />,
                 onClick: () => setShowRemoteSelector(true),
                 disabled: connections.length === 0,
@@ -263,7 +279,7 @@ export const FolderAnalysisTab: React.FC = () => {
                   {getPathName(folderAnalysisPath)}
                 </Text>
               ) : (
-                '选择文件夹'
+                t('analysis.folder.selectFolder')
               )}
               <DownOutlined style={{ fontSize: 10 }} />
             </Space>
@@ -278,12 +294,12 @@ export const FolderAnalysisTab: React.FC = () => {
           loading={folderAnalysisLoading}
           disabled={!folderAnalysisPath}
         >
-          开始分析
+          {t('analysis.folder.startAnalyze')}
         </Button>
         
         {folderAnalysis && (
           <Button onClick={clearFolderAnalysis}>
-            清除结果
+            {t('analysis.folder.clearResults')}
           </Button>
         )}
       </Space>
@@ -300,7 +316,7 @@ export const FolderAnalysisTab: React.FC = () => {
           <LoadingOutlined style={{ fontSize: 48, color: colors.accentBlue, marginBottom: 24 }} />
           <div style={{ marginBottom: 24 }}>
             <Title level={4} style={{ margin: 0, color: colors.textPrimary }}>
-              {progress?.message || '正在分析文件夹...'}
+              {progress?.message || t('analysis.folder.progressDefault')}
             </Title>
           </div>
           {progress && progress.total > 0 && (
@@ -314,12 +330,15 @@ export const FolderAnalysisTab: React.FC = () => {
                 }}
               />
               <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>
-                已处理 {progress.current.toLocaleString()} / {progress.total.toLocaleString()} 个文件
+                {t('analysis.folder.progressFiles', {
+                  current: progress.current.toLocaleString(),
+                  total: progress.total.toLocaleString(),
+                })}
               </Text>
             </div>
           )}
           {(!progress || progress.total === 0) && (
-            <Text type="secondary">正在统计文件数量...</Text>
+            <Text type="secondary">{t('analysis.folder.countingFiles')}</Text>
           )}
         </Card>
       ) : folderAnalysis ? (
@@ -329,7 +348,7 @@ export const FolderAnalysisTab: React.FC = () => {
             <Col span={6}>
               <Card style={{ background: colors.bgCard }}>
                 <Statistic
-                  title="总大小"
+                  title={t('analysis.folder.statTotalSize')}
                   value={folderAnalysis.totalSizeFormatted}
                   prefix={<PieChartOutlined style={{ color: colors.accentBlue }} />}
                 />
@@ -338,7 +357,7 @@ export const FolderAnalysisTab: React.FC = () => {
             <Col span={6}>
               <Card style={{ background: colors.bgCard }}>
                 <Statistic
-                  title="文件数量"
+                  title={t('analysis.folder.statFileCount')}
                   value={folderAnalysis.totalFiles}
                   prefix={<FileOutlined style={{ color: colors.accentGreen }} />}
                 />
@@ -347,7 +366,7 @@ export const FolderAnalysisTab: React.FC = () => {
             <Col span={6}>
               <Card style={{ background: colors.bgCard }}>
                 <Statistic
-                  title="文件夹数量"
+                  title={t('analysis.folder.statFolderCount')}
                   value={folderAnalysis.totalDirs}
                   prefix={<FolderOpenOutlined style={{ color: colors.accentOrange }} />}
                 />
@@ -356,7 +375,7 @@ export const FolderAnalysisTab: React.FC = () => {
             <Col span={6}>
               <Card style={{ background: colors.bgCard }}>
                 <Statistic
-                  title="重复文件组"
+                  title={t('analysis.folder.statDuplicateGroups')}
                   value={folderAnalysis.duplicateGroups.length}
                   prefix={<CopyOutlined style={{ color: colors.accentPurple }} />}
                 />
@@ -371,7 +390,7 @@ export const FolderAnalysisTab: React.FC = () => {
                 title={
                   <Space>
                     <PieChartOutlined style={{ color: colors.accentBlue }} />
-                    <span>文件类型分布</span>
+                    <span>{t('analysis.folder.sectionTypeDistribution')}</span>
                   </Space>
                 }
                 style={{ marginBottom: 16, background: colors.bgCard }}
@@ -391,7 +410,7 @@ export const FolderAnalysisTab: React.FC = () => {
                 title={
                   <Space>
                     <ThunderboltOutlined style={{ color: colors.accentOrange }} />
-                    <span>大文件 TOP 10</span>
+                    <span>{t('analysis.folder.sectionLargeFiles')}</span>
                   </Space>
                 }
                 style={{ marginBottom: 16, background: colors.bgCard }}
@@ -414,7 +433,9 @@ export const FolderAnalysisTab: React.FC = () => {
                 title={
                   <Space>
                     <CopyOutlined style={{ color: colors.accentPurple }} />
-                    <span>重复文件</span>
+                    <Tooltip title={t('analysis.folder.duplicateHeuristicHint')}>
+                      <span>{t('analysis.folder.sectionDuplicates')}</span>
+                    </Tooltip>
                   </Space>
                 }
                 style={{ marginBottom: 16, background: colors.bgCard }}
@@ -442,7 +463,7 @@ export const FolderAnalysisTab: React.FC = () => {
                     }}
                   />
                 ) : (
-                  <Empty description="未发现重复文件" />
+                  <Empty description={t('analysis.folder.emptyNoDuplicates')} />
                 )}
               </Card>
             </Col>
@@ -451,7 +472,7 @@ export const FolderAnalysisTab: React.FC = () => {
                 title={
                   <Space>
                     <ClockCircleOutlined style={{ color: colors.accentGreen }} />
-                    <span>长期未修改文件</span>
+                    <span>{t('analysis.folder.sectionOldFiles')}</span>
                   </Space>
                 }
                 style={{ marginBottom: 16, background: colors.bgCard }}
@@ -466,7 +487,7 @@ export const FolderAnalysisTab: React.FC = () => {
                     rowKey="path"
                   />
                 ) : (
-                  <Empty description="没有超过180天未修改的文件" />
+                  <Empty description={t('analysis.folder.emptyNoOldFiles')} />
                 )}
               </Card>
             </Col>
@@ -477,9 +498,9 @@ export const FolderAnalysisTab: React.FC = () => {
           image={<PieChartOutlined style={{ fontSize: 64, color: colors.border }} />}
           description={
             <Space direction="vertical">
-              <Text type="secondary">选择一个文件夹开始分析</Text>
+              <Text type="secondary">{t('analysis.folder.emptySelectFolder')}</Text>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                分析文件类型分布、大文件、重复文件、旧文件等
+                {t('analysis.folder.emptyHint')}
               </Text>
             </Space>
           }

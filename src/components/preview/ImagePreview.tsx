@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Image, Spin } from 'antd';
+import { useTranslation } from 'react-i18next';
 import { convertFileSrc } from '@tauri-apps/api/core';
 
 interface ImagePreviewProps {
@@ -8,6 +9,7 @@ interface ImagePreviewProps {
 }
 
 export const ImagePreview: React.FC<ImagePreviewProps> = ({ filePath, fileName }) => {
+  const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
 
   const imageSrc = convertFileSrc(filePath);
@@ -16,7 +18,7 @@ export const ImagePreview: React.FC<ImagePreviewProps> = ({ filePath, fileName }
     <div style={{ textAlign: 'center', position: 'relative' }}>
       {loading && (
         <div style={{ padding: 40 }}>
-          <Spin tip="加载图片中..." />
+          <Spin tip={t('preview.image.loading')} />
         </div>
       )}
       <Image
@@ -31,7 +33,7 @@ export const ImagePreview: React.FC<ImagePreviewProps> = ({ filePath, fileName }
         }}
         onLoad={() => setLoading(false)}
         preview={{
-          mask: '点击预览大图',
+          mask: t('preview.image.previewMask'),
         }}
       />
     </div>

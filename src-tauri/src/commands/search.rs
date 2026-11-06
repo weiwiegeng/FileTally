@@ -1,9 +1,32 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use walkdir::WalkDir;
 use regex::RegexBuilder;
 use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
+
+/// Per-job cancel: cancel only affects the job id that was current when cancel was called.
+static SEARCH_JOB_ID: AtomicU64 = AtomicU64::new(0);
+static SEARCH_CANCEL_ID: AtomicU64 = AtomicU64::new(0);
+
+const SEARCH_FILE_CAP: usize = 500_000;
+/// After walk cancel/timeout, still scan a bounded set for partial hits (then honor cancel again).
+const POST_WALK_CANCEL_CAP: usize = 2_000;
+
+fn begin_search_job() -> u64 {
+    SEARCH_JOB_ID.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+fn is_search_cancelled(job_id: u64) -> bool {
+    SEARCH_CANCEL_ID.load(Ordering::SeqCst) == job_id
+}
+
+fn clear_search_cancel(job_id: u64) {
+    let _ = SEARCH_CANCEL_ID.compare_exchange(job_id, 0, Ordering::SeqCst, Ordering::SeqCst);
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,6 +63,8 @@ pub struct SearchResponse {
     pub matched: Vec<SearchResult>,
     pub unmatched: Vec<UnmatchedFile>,
     pub total_scanned: usize,
+    pub cancelled: bool,
+    pub truncated: bool,
 }
 
 /// 多关键词检查结果 - 单个文件
@@ -60,6 +85,8 @@ pub struct KeywordCheckResponse {
     pub total_scanned: usize,
     pub total_with_missing: usize,
     pub keywords: Vec<String>,
+    pub cancelled: bool,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +97,8 @@ pub struct SearchOptions {
     pub include_hidden: bool,
     pub file_extensions: Option<Vec<String>>,
     pub max_pdf_size_mb: Option<u64>,  // PDF 最大处理大小 (MB)
+    pub max_text_size_mb: Option<u64>, // 文本最大读取大小 (MB)
+    pub max_concurrency: Option<usize>, // 并行线程数
 }
 
 impl Default for SearchOptions {
@@ -81,8 +110,28 @@ impl Default for SearchOptions {
             include_hidden: false,
             file_extensions: None,
             max_pdf_size_mb: Some(30),
+            max_text_size_mb: Some(10),
+            max_concurrency: Some(4),
         }
     }
+}
+
+/// 预分配搜索 job id（供前端超时/取消精确指向，避免误杀后续任务）
+#[tauri::command]
+pub fn prepare_search() -> Result<u64, String> {
+    Ok(begin_search_job())
+}
+
+/// 取消指定搜索 job；未传 job_id 时取消当前 job
+#[tauri::command]
+pub fn cancel_search(job_id: Option<u64>) -> Result<(), String> {
+    let id = job_id
+        .filter(|v| *v > 0)
+        .unwrap_or_else(|| SEARCH_JOB_ID.load(Ordering::SeqCst));
+    if id > 0 {
+        SEARCH_CANCEL_ID.store(id, Ordering::SeqCst);
+    }
+    Ok(())
 }
 
 /// 判断文件是否为文本文件
@@ -140,20 +189,25 @@ fn search_text_content(content: &str, query: &str, case_sensitive: bool) -> Vec<
     matches
 }
 
-/// 读取文本文件内容
-fn read_text_file(path: &Path) -> Option<String> {
+/// 读取文本文件内容（带大小上限）
+fn read_text_file(path: &Path, max_bytes: u64) -> Option<String> {
+    if let Ok(metadata) = fs::metadata(path) {
+        if metadata.len() > max_bytes {
+            return None;
+        }
+    }
+
     // 先尝试 UTF-8
     if let Ok(content) = fs::read_to_string(path) {
         return Some(content);
     }
-    
+
     // 尝试其他编码
     if let Ok(bytes) = fs::read(path) {
-        // 尝试 GBK
         let (decoded, _, _) = encoding_rs::GBK.decode(&bytes);
         return Some(decoded.into_owned());
     }
-    
+
     None
 }
 
@@ -204,7 +258,15 @@ fn search_single_file(
     search_content: bool,
     search_filename: bool,
     max_pdf_size_mb: u64,
+    max_text_bytes: u64,
+    job_id: u64,
+    respect_cancel: bool,
 ) -> FileSearchResult {
+    // Walk-phase cancel keeps respect_cancel=false so already-listed files still yield partial hits.
+    if respect_cancel && is_search_cancelled(job_id) {
+        return FileSearchResult::Skipped;
+    }
+
     let file_name = file_path.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("")
@@ -226,7 +288,7 @@ fn search_single_file(
         if filename_matched {
             matches.push(SearchMatch {
                 line_number: 0,
-                content: format!("文件名匹配: {}", file_name),
+                content: format!("[filename] {}", file_name),
                 match_start: 0,
                 match_end: 0,
             });
@@ -238,7 +300,7 @@ fn search_single_file(
         // 文本文件
         if is_text_file(&extension) {
             was_searched = true;
-            if let Some(content) = read_text_file(file_path) {
+            if let Some(content) = read_text_file(file_path, max_text_bytes) {
                 let content_matches = search_text_content(&content, query, case_sensitive);
                 matches.extend(content_matches);
             }
@@ -278,76 +340,123 @@ pub async fn search_files(
     paths: Vec<String>,
     query: String,
     options: SearchOptions,
+    job_id: Option<u64>,
 ) -> Result<SearchResponse, String> {
+    tokio::task::spawn_blocking(move || search_files_sync(paths, query, options, job_id))
+        .await
+        .map_err(|e| crate::err::with_detail("analysis_task_failed", e))?
+}
+
+fn search_files_sync(
+    paths: Vec<String>,
+    query: String,
+    options: SearchOptions,
+    job_id: Option<u64>,
+) -> Result<SearchResponse, String> {
+    let job_id = match job_id {
+        Some(id) if id > 0 => id,
+        _ => begin_search_job(),
+    };
+
     if paths.is_empty() {
-        return Err("请选择至少一个搜索目录".to_string());
+        return Err(crate::err::code("search_need_paths"));
+    }
+
+    if query.trim().is_empty() {
+        return Err(crate::err::code("search_need_query"));
+    }
+
+    if !options.search_content && !options.search_filename {
+        return Err(crate::err::code("search_need_mode"));
     }
     
-    // 验证所有路径是否存在
     for path in &paths {
+        crate::path_util::validate_user_path(path)?;
         let search_path = Path::new(path);
         if !search_path.exists() {
-            return Err(format!("搜索路径不存在: {}", path));
+            return Err(crate::err::with_detail("search_path_missing", path));
         }
     }
     
-    // 第一步：收集所有需要搜索的文件路径（从多个目录）
     let mut files_to_search: Vec<PathBuf> = Vec::new();
-    
-    for path in &paths {
+    let mut cancelled_during_walk = false;
+    let mut truncated = false;
+
+    'outer: for path in &paths {
         let search_path = Path::new(path);
-        let entries: Vec<PathBuf> = WalkDir::new(search_path)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|entry| {
-                let entry_path = entry.path();
-                
-                // 跳过目录
-                if entry_path.is_dir() {
-                    return false;
+        for entry in WalkDir::new(search_path).follow_links(false).into_iter().filter_map(|e| e.ok()) {
+            if is_search_cancelled(job_id) {
+                cancelled_during_walk = true;
+                break 'outer;
+            }
+            let ft = entry.file_type();
+            // Skip symlinks entirely (consistent with transfer; avoid following link targets).
+            if ft.is_symlink() || ft.is_dir() {
+                continue;
+            }
+            let entry_path = entry.path();
+            if !options.include_hidden && is_hidden(entry_path) {
+                continue;
+            }
+            if let Some(ref exts) = options.file_extensions {
+                let extension = entry_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if !exts.is_empty() && !exts.iter().any(|e| e.eq_ignore_ascii_case(extension)) {
+                    continue;
                 }
-                
-                // 隐藏文件过滤
-                if !options.include_hidden && is_hidden(entry_path) {
-                    return false;
-                }
-                
-                // 扩展名过滤
-                if let Some(ref exts) = options.file_extensions {
-                    let extension = entry_path.extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("");
-                    if !exts.is_empty() && !exts.iter().any(|e| e.eq_ignore_ascii_case(extension)) {
-                        return false;
-                    }
-                }
-                
-                true
-            })
-            .map(|e| e.path().to_path_buf())
-            .collect();
-        
-        files_to_search.extend(entries);
+            }
+            files_to_search.push(entry_path.to_path_buf());
+            // CAP+1 sentinel: exact-CAP trees are not falsely marked truncated.
+            if files_to_search.len() > SEARCH_FILE_CAP {
+                files_to_search.truncate(SEARCH_FILE_CAP);
+                truncated = true;
+                break 'outer;
+            }
+        }
     }
-    
-    // 第二步：并行搜索所有文件
+
+    // Walk-phase cancel: clear cancel so listed files can still yield partial hits,
+    // but cap the set and keep respect_cancel=true so a new cancel/timeout still stops work.
+    let walk_cancelled = cancelled_during_walk;
+    if walk_cancelled {
+        clear_search_cancel(job_id);
+        if files_to_search.len() > POST_WALK_CANCEL_CAP {
+            files_to_search.truncate(POST_WALK_CANCEL_CAP);
+        }
+    }
+
     let max_pdf_size = options.max_pdf_size_mb.unwrap_or(30);
-    let results: Vec<FileSearchResult> = files_to_search
-        .par_iter()
-        .map(|file_path| {
-            search_single_file(
-                file_path,
-                &query,
-                options.case_sensitive,
-                options.search_content,
-                options.search_filename,
-                max_pdf_size,
-            )
-        })
-        .collect();
+    let max_text_bytes = options
+        .max_text_size_mb
+        .unwrap_or(10)
+        .saturating_mul(1024 * 1024)
+        .max(1);
+    let concurrency = options.max_concurrency.unwrap_or(4).clamp(1, 16);
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .build()
+        .map_err(|e| crate::err::with_detail("thread_pool_failed", e))?;
+
+    let results: Vec<FileSearchResult> = pool.install(|| {
+        files_to_search
+            .par_iter()
+            .map(|file_path| {
+                search_single_file(
+                    file_path,
+                    &query,
+                    options.case_sensitive,
+                    options.search_content,
+                    options.search_filename,
+                    max_pdf_size,
+                    max_text_bytes,
+                    job_id,
+                    true,
+                )
+            })
+            .collect()
+    });
+
+    let cancelled = walk_cancelled || is_search_cancelled(job_id);
     
-    // 第三步：汇总结果
     let mut matched = Vec::new();
     let mut unmatched = Vec::new();
     let mut total_scanned = 0;
@@ -366,13 +475,14 @@ pub async fn search_files(
         }
     }
     
-    // 按匹配数量排序
     matched.sort_by(|a, b| b.match_count.cmp(&a.match_count));
     
     Ok(SearchResponse {
         matched,
         unmatched,
         total_scanned,
+        cancelled,
+        truncated,
     })
 }
 
@@ -397,7 +507,16 @@ fn check_file_keywords(
     search_content: bool,
     search_filename: bool,
     max_pdf_size_mb: u64,
+    max_text_bytes: u64,
+    job_id: u64,
+    respect_cancel: bool,
+    scanned: &AtomicUsize,
 ) -> Option<KeywordCheckResult> {
+    if respect_cancel && is_search_cancelled(job_id) {
+        return None;
+    }
+    scanned.fetch_add(1, Ordering::Relaxed);
+
     let file_name = file_path.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("")
@@ -413,7 +532,7 @@ fn check_file_keywords(
     // 获取文件内容
     let content = if search_content {
         if is_text_file(&extension) {
-            read_text_file(file_path)
+            read_text_file(file_path, max_text_bytes)
         } else if is_pdf_file(&extension) {
             extract_pdf_text(file_path, max_pdf_size_mb)
         } else {
@@ -423,8 +542,18 @@ fn check_file_keywords(
         None
     };
     
-    // 如果不搜索内容且不搜索文件名，或者搜索内容但无法读取内容，跳过
+    // 仅内容搜索且读不到：
+    // - 文本/PDF（尝试过但失败）→ 记为全部缺失
+    // - 其它二进制/不支持类型 → 跳过，避免误报刷屏
     if !search_filename && content.is_none() {
+        if search_content && (is_text_file(&extension) || is_pdf_file(&extension)) {
+            return Some(KeywordCheckResult {
+                file_path: file_path.to_string_lossy().to_string(),
+                file_name,
+                file_type,
+                missing_keywords: keywords.to_vec(),
+            });
+        }
         return None;
     }
     
@@ -474,91 +603,134 @@ pub async fn check_keywords(
     paths: Vec<String>,
     keywords: Vec<String>,
     options: SearchOptions,
+    job_id: Option<u64>,
 ) -> Result<KeywordCheckResponse, String> {
+    tokio::task::spawn_blocking(move || check_keywords_sync(paths, keywords, options, job_id))
+        .await
+        .map_err(|e| crate::err::with_detail("analysis_task_failed", e))?
+}
+
+fn check_keywords_sync(
+    paths: Vec<String>,
+    keywords: Vec<String>,
+    options: SearchOptions,
+    job_id: Option<u64>,
+) -> Result<KeywordCheckResponse, String> {
+    let job_id = match job_id {
+        Some(id) if id > 0 => id,
+        _ => begin_search_job(),
+    };
+
     if paths.is_empty() {
-        return Err("请选择至少一个搜索目录".to_string());
+        return Err(crate::err::code("search_need_paths"));
     }
     
-    // 验证所有路径是否存在
     for path in &paths {
+        crate::path_util::validate_user_path(path)?;
         let search_path = Path::new(path);
         if !search_path.exists() {
-            return Err(format!("搜索路径不存在: {}", path));
+            return Err(crate::err::with_detail("search_path_missing", path));
         }
     }
     
     if keywords.is_empty() {
-        return Err("请提供至少一个关键词".to_string());
+        return Err(crate::err::code("search_need_keywords"));
+    }
+
+    if !options.search_content && !options.search_filename {
+        return Err(crate::err::code("search_need_mode"));
     }
     
-    // 第一步：收集所有需要搜索的文件路径（从多个目录）
     let mut files_to_check: Vec<PathBuf> = Vec::new();
-    
-    for path in &paths {
+    let mut cancelled_during_walk = false;
+    let mut truncated = false;
+
+    'outer: for path in &paths {
         let search_path = Path::new(path);
-        let entries: Vec<PathBuf> = WalkDir::new(search_path)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|entry| {
-                let entry_path = entry.path();
-                
-                // 跳过目录
-                if entry_path.is_dir() {
-                    return false;
+        for entry in WalkDir::new(search_path).follow_links(false).into_iter().filter_map(|e| e.ok()) {
+            if is_search_cancelled(job_id) {
+                cancelled_during_walk = true;
+                break 'outer;
+            }
+            let ft = entry.file_type();
+            if ft.is_symlink() || ft.is_dir() {
+                continue;
+            }
+            let entry_path = entry.path();
+            if !options.include_hidden && is_hidden(entry_path) {
+                continue;
+            }
+            if let Some(ref exts) = options.file_extensions {
+                let extension = entry_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if !exts.is_empty() && !exts.iter().any(|e| e.eq_ignore_ascii_case(extension)) {
+                    continue;
                 }
-                
-                // 隐藏文件过滤
-                if !options.include_hidden && is_hidden(entry_path) {
-                    return false;
-                }
-                
-                // 扩展名过滤
-                if let Some(ref exts) = options.file_extensions {
-                    let extension = entry_path.extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("");
-                    if !exts.is_empty() && !exts.iter().any(|e| e.eq_ignore_ascii_case(extension)) {
-                        return false;
-                    }
-                }
-                
-                true
-            })
-            .map(|e| e.path().to_path_buf())
-            .collect();
-        
-        files_to_check.extend(entries);
+            }
+            files_to_check.push(entry_path.to_path_buf());
+            if files_to_check.len() > SEARCH_FILE_CAP {
+                files_to_check.truncate(SEARCH_FILE_CAP);
+                truncated = true;
+                break 'outer;
+            }
+        }
     }
-    
-    // 第二步：并行检查所有文件
+
+    let walk_cancelled = cancelled_during_walk;
+    if walk_cancelled {
+        clear_search_cancel(job_id);
+        if files_to_check.len() > POST_WALK_CANCEL_CAP {
+            files_to_check.truncate(POST_WALK_CANCEL_CAP);
+        }
+    }
+
     let max_pdf_size = options.max_pdf_size_mb.unwrap_or(30);
-    let results: Vec<Option<KeywordCheckResult>> = files_to_check
-        .par_iter()
-        .map(|file_path| {
-            check_file_keywords(
-                file_path,
-                &keywords,
-                options.case_sensitive,
-                options.search_content,
-                options.search_filename,
-                max_pdf_size,
-            )
-        })
-        .collect();
+    let max_text_bytes = options
+        .max_text_size_mb
+        .unwrap_or(10)
+        .saturating_mul(1024 * 1024)
+        .max(1);
+    let concurrency = options.max_concurrency.unwrap_or(4).clamp(1, 16);
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .build()
+        .map_err(|e| crate::err::with_detail("thread_pool_failed", e))?;
+
+    let scanned = Arc::new(AtomicUsize::new(0));
+    let results: Vec<Option<KeywordCheckResult>> = pool.install(|| {
+        files_to_check
+            .par_iter()
+            .map(|file_path| {
+                check_file_keywords(
+                    file_path,
+                    &keywords,
+                    options.case_sensitive,
+                    options.search_content,
+                    options.search_filename,
+                    max_pdf_size,
+                    max_text_bytes,
+                    job_id,
+                    true,
+                    &scanned,
+                )
+            })
+            .collect()
+    });
+
+    let cancelled = walk_cancelled || is_search_cancelled(job_id);
     
-    // 第三步：汇总结果
     let mut check_results = Vec::new();
-    let mut total_scanned = 0;
+    let total_scanned = if cancelled {
+        scanned.load(Ordering::Relaxed)
+    } else {
+        files_to_check.len()
+    };
     
     for result in results {
-        total_scanned += 1;
         if let Some(r) = result {
             check_results.push(r);
         }
     }
     
-    // 按缺失关键词数量排序（缺失越多排越前）
     check_results.sort_by(|a, b| b.missing_keywords.len().cmp(&a.missing_keywords.len()));
     
     let total_with_missing = check_results.len();
@@ -568,5 +740,7 @@ pub async fn check_keywords(
         total_scanned,
         total_with_missing,
         keywords,
+        cancelled,
+        truncated,
     })
 }

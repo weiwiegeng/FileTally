@@ -5,12 +5,14 @@ import {
   FileOutlined,
   SwapOutlined,
 } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import { useTransferStore, ConflictResolution } from '../../stores';
 import { useThemeColors } from '../../hooks';
 
 const { Text } = Typography;
 
 export const ConflictModal: React.FC = () => {
+  const { t } = useTranslation();
   const {
     conflicts,
     showConflictModal,
@@ -34,7 +36,7 @@ export const ConflictModal: React.FC = () => {
       title={
         <Space>
           <WarningOutlined style={{ color: '#faad14' }} />
-          <span>文件冲突</span>
+          <span>{t('transfer.conflict.title')}</span>
         </Space>
       }
       open={showConflictModal}
@@ -42,21 +44,21 @@ export const ConflictModal: React.FC = () => {
       width={700}
       footer={[
         <Button key="cancel" onClick={handleCancel}>
-          取消
+          {t('transfer.conflict.cancel')}
         </Button>,
         <Button key="confirm" type="primary" onClick={handleConfirm}>
-          确认处理
+          {t('transfer.conflict.confirm')}
         </Button>,
       ]}
     >
       <Alert
         type="warning"
-        message={`发现 ${conflicts.length} 个文件与目标目录中的文件重名`}
+        message={t('transfer.conflict.summary', { count: conflicts.length })}
         style={{ marginBottom: 16 }}
       />
 
       <div style={{ marginBottom: 16 }}>
-        <Text strong>请选择处理方式：</Text>
+        <Text strong>{t('transfer.conflict.chooseStrategy')}</Text>
         <Radio.Group
           value={resolution}
           onChange={(e) => setResolution(e.target.value)}
@@ -65,27 +67,27 @@ export const ConflictModal: React.FC = () => {
           <Space direction="vertical">
             <Radio value="rename">
               <Space>
-                <span>重命名</span>
-                <Text type="secondary">自动添加数字后缀，保留原文件</Text>
+                <span>{t('transfer.conflict.rename')}</span>
+                <Text type="secondary">{t('transfer.conflict.renameHint')}</Text>
               </Space>
             </Radio>
             <Radio value="overwrite">
               <Space>
-                <span>覆盖</span>
-                <Text type="secondary">用新文件替换目标目录中的同名文件</Text>
+                <span>{t('transfer.conflict.overwrite')}</span>
+                <Text type="secondary">{t('transfer.conflict.overwriteHint')}</Text>
               </Space>
             </Radio>
             <Radio value="skip">
               <Space>
-                <span>跳过</span>
-                <Text type="secondary">保留目标目录中的文件，不传输冲突文件</Text>
+                <span>{t('transfer.conflict.skip')}</span>
+                <Text type="secondary">{t('transfer.conflict.skipHint')}</Text>
               </Space>
             </Radio>
           </Space>
         </Radio.Group>
       </div>
 
-      <Text strong>冲突文件列表：</Text>
+      <Text strong>{t('transfer.conflict.listTitle')}</Text>
       <List
         size="small"
         dataSource={conflicts}
@@ -111,9 +113,13 @@ export const ConflictModal: React.FC = () => {
                 </Text>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Tag color="blue">源: {item.sourceSizeFormatted}</Tag>
+                <Tag color="blue">
+                  {t('transfer.conflict.tagSource', { size: item.sourceSizeFormatted })}
+                </Tag>
                 <SwapOutlined style={{ color: colors.textSecondary }} />
-                <Tag color="orange">目标: {item.targetSizeFormatted}</Tag>
+                <Tag color="orange">
+                  {t('transfer.conflict.tagTarget', { size: item.targetSizeFormatted })}
+                </Tag>
               </div>
             </div>
           </List.Item>

@@ -1,4 +1,5 @@
 import { AIConfig, AIProvider } from '../stores/settingsStore';
+import i18n from '../i18n';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -191,24 +192,20 @@ export class AIService {
 
   // 生成文档摘要
   async summarizeDocument(content: string, fileName: string): Promise<string> {
+    const truncated =
+      content.slice(0, 15000) +
+      (content.length > 15000 ? i18n.t('ai.prompts.contentTruncated') : '');
     const messages: ChatMessage[] = [
       {
         role: 'system',
-        content: '你是一个专业的文档分析助手。请用简洁清晰的语言总结文档内容，包括主要观点、关键信息和结论。',
+        content: i18n.t('ai.prompts.summarizeSystem'),
       },
       {
         role: 'user',
-        content: `请为以下文档生成摘要：
-
-文件名：${fileName}
-
-文档内容：
-${content.slice(0, 15000)}${content.length > 15000 ? '\n...(内容已截断)' : ''}
-
-请生成一个结构化的摘要，包含：
-1. 文档概述（1-2句话）
-2. 主要内容要点
-3. 关键结论或建议（如果有）`,
+        content: i18n.t('ai.prompts.summarizeUser', {
+          fileName,
+          content: truncated,
+        }),
       },
     ];
 
@@ -218,22 +215,21 @@ ${content.slice(0, 15000)}${content.length > 15000 ? '\n...(内容已截断)' : 
 
   // 回答关于文档的问题
   async askAboutDocument(content: string, fileName: string, question: string): Promise<string> {
+    const truncated =
+      content.slice(0, 15000) +
+      (content.length > 15000 ? i18n.t('ai.prompts.contentTruncated') : '');
     const messages: ChatMessage[] = [
       {
         role: 'system',
-        content: '你是一个专业的文档分析助手。请根据提供的文档内容回答用户的问题。如果问题与文档内容无关或文档中没有相关信息，请如实说明。',
+        content: i18n.t('ai.prompts.askSystem'),
       },
       {
         role: 'user',
-        content: `文档信息：
-文件名：${fileName}
-
-文档内容：
-${content.slice(0, 15000)}${content.length > 15000 ? '\n...(内容已截断)' : ''}
-
----
-
-我的问题是：${question}`,
+        content: i18n.t('ai.prompts.askUser', {
+          fileName,
+          content: truncated,
+          question,
+        }),
       },
     ];
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Button, Typography, Space, Switch, Select, Dropdown, Tag, Tooltip } from 'antd';
+import { Button, Typography, Space, Switch, Select, Dropdown, Tag, Tooltip, Alert } from 'antd';
 import {
   FolderOpenOutlined,
   EyeOutlined,
@@ -9,20 +9,25 @@ import {
   DownOutlined,
   CloseOutlined,
   ClearOutlined,
+  HomeOutlined,
 } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import { useFileStore, useSettingsStore, useRemoteStore } from '../../stores';
 import { FileTree } from './FileTree';
 import { FilePreview } from './FilePreview';
 import { useThemeColors } from '../../hooks';
 import { RemoteFolderSelector } from '../search/RemoteFolderSelector';
 import { isRemotePath } from '../../utils/format';
+import { normalizeSortField } from '../../utils/sortFiles';
 
 const { Title, Text } = Typography;
 
 export const FileBrowser: React.FC = () => {
+  const { t } = useTranslation();
   const { 
     currentPaths, 
-    pickDirectory, 
+    pickDirectory,
+    openHomeDirectory,
     addPath,
     removePath,
     clearPaths,
@@ -31,7 +36,8 @@ export const FileBrowser: React.FC = () => {
     sortField, 
     sortOrder, 
     setSortField, 
-    setSortOrder 
+    setSortOrder,
+    error,
   } = useFileStore();
   const { settings } = useSettingsStore();
   const { connections } = useRemoteStore();
@@ -39,18 +45,32 @@ export const FileBrowser: React.FC = () => {
   const initializedRef = useRef(false);
   const [showRemoteSelector, setShowRemoteSelector] = useState(false);
 
-  // 初次加载时应用设置中的默认值
+  // 初次加载 + 设置变更时同步
   useEffect(() => {
     if (!initializedRef.current) {
       initializedRef.current = true;
-      // 应用默认设置
-      if (settings.showHiddenFiles !== showHidden) {
-        toggleShowHidden();
-      }
-      setSortField(settings.sortBy as any);
-      setSortOrder(settings.sortOrder);
     }
-  }, []);
+    if (settings.showHiddenFiles !== showHidden) {
+      toggleShowHidden();
+    }
+    setSortField(normalizeSortField(settings.sortBy));
+    setSortOrder(settings.sortOrder);
+  }, [settings.showHiddenFiles, settings.sortBy, settings.sortOrder]);
+
+  // 浏览器内改动回写设置
+  const handleSortFieldChange = (value: string) => {
+    const field = normalizeSortField(value);
+    setSortField(field);
+    useSettingsStore.getState().updateSettings({ sortBy: field });
+  };
+  const handleSortOrderChange = (value: 'asc' | 'desc') => {
+    setSortOrder(value);
+    useSettingsStore.getState().updateSettings({ sortOrder: value });
+  };
+  const handleShowHiddenChange = (checked: boolean) => {
+    if (checked !== showHidden) toggleShowHidden();
+    useSettingsStore.getState().updateSettings({ showHiddenFiles: checked });
+  };
 
   // 获取文件夹名称
   const getFolderName = (path: string) => {
@@ -73,7 +93,7 @@ export const FileBrowser: React.FC = () => {
         <Space>
           <FolderOpenOutlined style={{ fontSize: 24, color: colors.accentOrange }} />
           <Title level={4} style={{ margin: 0, color: colors.textPrimary }}>
-            文件浏览器
+            {t('browser.fileBrowser.title')}
           </Title>
         </Space>
         <Space>
@@ -82,23 +102,23 @@ export const FileBrowser: React.FC = () => {
             <Select
               size="small"
               value={sortField}
-              onChange={(value) => setSortField(value as any)}
+              onChange={handleSortFieldChange}
               style={{ width: 90 }}
               options={[
-                { label: '名称', value: 'name' },
-                { label: '大小', value: 'size' },
-                { label: '日期', value: 'date' },
-                { label: '类型', value: 'type' },
+                { label: t('browser.fileBrowser.sortByName'), value: 'name' },
+                { label: t('browser.fileBrowser.sortBySize'), value: 'size' },
+                { label: t('browser.fileBrowser.sortByDate'), value: 'modified_time' },
+                { label: t('browser.fileBrowser.sortByType'), value: 'extension' },
               ]}
             />
             <Select
               size="small"
               value={sortOrder}
-              onChange={(value) => setSortOrder(value as any)}
+              onChange={handleSortOrderChange}
               style={{ width: 70 }}
               options={[
-                { label: '升序', value: 'asc' },
-                { label: '降序', value: 'desc' },
+                { label: t('browser.fileBrowser.sortAsc'), value: 'asc' },
+                { label: t('browser.fileBrowser.sortDesc'), value: 'desc' },
               ]}
             />
           </Space>
@@ -109,12 +129,12 @@ export const FileBrowser: React.FC = () => {
               <EyeInvisibleOutlined style={{ color: colors.textSecondary }} />
             )}
             <Text type="secondary" style={{ fontSize: 12 }}>
-              隐藏文件
+              {t('browser.fileBrowser.showHidden')}
             </Text>
             <Switch
               size="small"
               checked={showHidden}
-              onChange={toggleShowHidden}
+              onChange={handleShowHiddenChange}
             />
           </Space>
           {currentPaths.length > 0 && (
@@ -124,7 +144,7 @@ export const FileBrowser: React.FC = () => {
               onClick={clearPaths}
               danger
             >
-              清空全部
+              {t('browser.fileBrowser.clearAll')}
             </Button>
           )}
           <Dropdown
@@ -132,13 +152,19 @@ export const FileBrowser: React.FC = () => {
               items: [
                 {
                   key: 'local',
-                  label: '本地文件夹',
+                  label: t('browser.fileBrowser.localFolder'),
                   icon: <FolderOpenOutlined />,
                   onClick: pickDirectory,
                 },
                 {
+                  key: 'home',
+                  label: t('browser.fileBrowser.homeFolder'),
+                  icon: <HomeOutlined />,
+                  onClick: () => { void openHomeDirectory(); },
+                },
+                {
                   key: 'remote',
-                  label: '远程文件夹',
+                  label: t('browser.fileBrowser.remoteFolder'),
                   icon: <CloudServerOutlined />,
                   onClick: () => setShowRemoteSelector(true),
                   disabled: connections.length === 0,
@@ -149,7 +175,7 @@ export const FileBrowser: React.FC = () => {
             <Button type="primary">
               <Space>
                 <FolderOpenOutlined />
-                <span>选择文件夹</span>
+                <span>{t('browser.fileBrowser.selectFolder')}</span>
                 {currentPaths.length > 0 && (
                   <Tag color="blue" style={{ marginLeft: 4 }}>{currentPaths.length}</Tag>
                 )}
@@ -172,7 +198,7 @@ export const FileBrowser: React.FC = () => {
             gap: 8,
           }}
         >
-          <Text type="secondary" style={{ lineHeight: '24px' }}>已选 {currentPaths.length} 个目录:</Text>
+          <Text type="secondary" style={{ lineHeight: '24px' }}>{t('browser.fileBrowser.selectedDirs', { count: currentPaths.length })}</Text>
           {currentPaths.map((path) => (
             <Tag
               key={path}
@@ -190,16 +216,37 @@ export const FileBrowser: React.FC = () => {
         </div>
       )}
 
+      {error && (
+        <Alert
+          type="error"
+          showIcon
+          closable
+          message={error}
+          style={{ margin: '8px 24px 0' }}
+        />
+      )}
+
       {/* Content */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
+      <div
+        style={{
+          flex: 1,
+          display: 'flex',
+          flexDirection: settings.previewPanelPosition === 'bottom' ? 'column' : 'row',
+          overflow: 'hidden',
+          minHeight: 0,
+        }}
+      >
         {/* File Tree Panel */}
         <div
           style={{
-            width: 400,
-            borderRight: `1px solid ${colors.border}`,
+            width: settings.previewPanelPosition === 'bottom' ? '100%' : 400,
+            height: settings.previewPanelPosition === 'bottom' ? '45%' : '100%',
+            borderRight:
+              settings.previewPanelPosition === 'right' ? `1px solid ${colors.border}` : undefined,
+            borderBottom:
+              settings.previewPanelPosition === 'bottom' ? `1px solid ${colors.border}` : undefined,
             overflow: 'auto',
             padding: 8,
-            height: '100%',
           }}
         >
           {currentPaths.length > 0 ? (
@@ -216,7 +263,7 @@ export const FileBrowser: React.FC = () => {
               }}
             >
               <FolderOpenOutlined style={{ fontSize: 64, color: colors.border }} />
-              <Text type="secondary">点击"选择文件夹"开始浏览</Text>
+              <Text type="secondary">{t('browser.fileBrowser.emptyHint')}</Text>
             </div>
           )}
         </div>

@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useSettingsStore } from '../stores';
 
 export interface ThemeColors {
@@ -29,11 +29,26 @@ export interface ThemeColors {
   isDark: boolean;
 }
 
+const getSystemPrefersDark = () =>
+  typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+
 export const useThemeColors = (): ThemeColors => {
   const { settings } = useSettingsStore();
+  const [systemDark, setSystemDark] = useState(getSystemPrefersDark);
+
+  useEffect(() => {
+    if (settings.theme !== 'system' || typeof window === 'undefined') return;
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => setSystemDark(media.matches);
+    onChange();
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, [settings.theme]);
   
   return useMemo(() => {
-    const isDark = settings.theme !== 'light';
+    const isDark =
+      settings.theme === 'dark' ||
+      (settings.theme === 'system' && systemDark);
     
     if (isDark) {
       return {
@@ -75,5 +90,5 @@ export const useThemeColors = (): ThemeColors => {
       accentRed: '#ff4d4f',
       isDark: false,
     };
-  }, [settings.theme]);
+  }, [settings.theme, systemDark]);
 };

@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
+import i18n from '../i18n';
+import { mapBackendError } from '../utils/backendError';
 
 // 传输方向
 export type TransferDirection = 'upload' | 'download';
@@ -31,6 +33,9 @@ export interface ConflictFile {
 // 冲突处理方式
 export type ConflictResolution = 'overwrite' | 'rename' | 'skip';
 
+// 冲突检查结果：区分「无冲突 / 有冲突 / 检查失败」
+export type ConflictCheckResult = 'none' | 'conflicts' | 'error';
+
 // 传输进度
 export interface TransferProgress {
   currentFile: string;
@@ -47,6 +52,8 @@ export interface TransferResult {
   transferred: number;
   skipped: number;
   failed: number;
+  cancelled?: boolean;
+  truncated?: boolean;
   errors: string[];
 }
 
@@ -71,6 +78,7 @@ interface TransferState {
   // 传输状态
   loading: boolean;
   transferring: boolean;
+  activeJobId: number;
   progress: TransferProgress | null;
   result: TransferResult | null;
   error: string | null;
@@ -88,9 +96,9 @@ interface TransferState {
   clearTargetPath: () => void;
   
   // 传输操作
-  checkConflicts: () => Promise<boolean>;
+  checkConflicts: () => Promise<ConflictCheckResult>;
   startTransfer: (resolution: ConflictResolution) => Promise<void>;
-  cancelTransfer: () => void;
+  cancelTransfer: () => Promise<void>;
   
   // 冲突弹窗
   setShowConflictModal: (show: boolean) => void;
@@ -126,6 +134,7 @@ export const useTransferStore = create<TransferState>((set, get) => ({
   targetConnectionName: null,
   loading: false,
   transferring: false,
+  activeJobId: 0,
   progress: null,
   result: null,
   error: null,
@@ -176,8 +185,8 @@ export const useTransferStore = create<TransferState>((set, get) => ({
     const { sourceItems, targetPath } = get();
     
     if (sourceItems.length === 0 || !targetPath) {
-      set({ error: '请选择源文件和目标目录' });
-      return false;
+      set({ error: i18n.t('transfer.store.needSourceAndTarget') });
+      return 'error';
     }
     
     set({ loading: true, error: null, conflicts: [] });
@@ -195,27 +204,44 @@ export const useTransferStore = create<TransferState>((set, get) => ({
           showConflictModal: true,
           loading: false,
         });
-        return true;
+        return 'conflicts';
       }
       
       set({ loading: false });
-      return false;
+      return 'none';
     } catch (err) {
-      set({ error: String(err), loading: false });
-      return false;
+      set({ error: mapBackendError(err), loading: false });
+      return 'error';
     }
   },
   
   startTransfer: async (resolution) => {
-    const { sourceItems, targetPath } = get();
+    const { sourceItems, targetPath, activeJobId: prevJobId } = get();
     
     if (sourceItems.length === 0 || !targetPath) {
-      set({ error: '请选择源文件和目标目录' });
+      set({ error: i18n.t('transfer.store.needSourceAndTarget') });
       return;
     }
+
+    if (prevJobId > 0) {
+      try {
+        await invoke('cancel_transfer', { jobId: prevJobId });
+      } catch {
+        // ignore
+      }
+    }
     
+    let jobId = 0;
+    try {
+      jobId = await invoke<number>('prepare_transfer');
+    } catch (err) {
+      set({ error: mapBackendError(err) });
+      return;
+    }
+
     set({
       transferring: true,
+      activeJobId: jobId,
       error: null,
       result: null,
       showConflictModal: false,
@@ -235,30 +261,56 @@ export const useTransferStore = create<TransferState>((set, get) => ({
         sourcePaths,
         targetPath,
         conflictResolution: resolution,
+        jobId,
       });
+
+      const mapped: TransferResult = {
+        ...result,
+        errors: (result.errors || []).map((e) => mapBackendError(e)),
+      };
       
       set({
-        result,
+        result: mapped,
         transferring: false,
+        activeJobId: 0,
         progress: null,
       });
       
-      // 传输成功后清空源文件列表
-      if (result.success) {
+      if (mapped.success) {
         set({ sourceItems: [] });
       }
     } catch (err) {
       set({
-        error: String(err),
+        error: mapBackendError(err),
         transferring: false,
+        activeJobId: 0,
         progress: null,
       });
     }
   },
   
-  cancelTransfer: () => {
-    // TODO: 实现取消传输逻辑
-    set({ transferring: false, progress: null });
+  cancelTransfer: async () => {
+    const { activeJobId } = get();
+    try {
+      await invoke('cancel_transfer', { jobId: activeJobId > 0 ? activeJobId : null });
+    } catch (err) {
+      console.error('cancel transfer failed:', err);
+    }
+    set((state) => {
+      if (state.progress) {
+        return { progress: { ...state.progress, currentFile: i18n.t('transfer.store.cancelling') } };
+      }
+      return {
+        progress: {
+          currentFile: i18n.t('transfer.store.cancelling'),
+          currentIndex: 0,
+          totalFiles: 0,
+          bytesTransferred: 0,
+          totalBytes: 0,
+          percentage: 0,
+        },
+      };
+    });
   },
   
   setShowConflictModal: (show) => set({ showConflictModal: show }),
@@ -271,6 +323,7 @@ export const useTransferStore = create<TransferState>((set, get) => ({
     targetConnectionName: null,
     loading: false,
     transferring: false,
+    activeJobId: 0,
     progress: null,
     result: null,
     error: null,

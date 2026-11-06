@@ -3,7 +3,9 @@ import { Spin, Alert, Space, Button, Typography } from 'antd';
 import { ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
 import { readFile } from '@tauri-apps/plugin-fs';
 import * as pdfjsLib from 'pdfjs-dist';
+import { useTranslation } from 'react-i18next';
 import { useThemeColors } from '../../hooks';
+import { mapBackendError } from '../../utils/backendError';
 
 // Set worker path to local file in public folder
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
@@ -15,6 +17,7 @@ interface PdfPreviewProps {
 }
 
 export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
+  const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRefs = useRef<Map<number, HTMLCanvasElement>>(new Map());
   const renderingRef = useRef<Set<number>>(new Set());
@@ -57,21 +60,28 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
         
         setPdfDoc(pdf);
         setTotalPages(pdf.numPages);
-        
-        // 预先获取所有页面的尺寸
+
+        // Only size page 1 as a placeholder — avoid prefetching every page viewport.
         const sizes = new Map<number, { width: number; height: number }>();
-        for (let i = 1; i <= pdf.numPages; i++) {
-          const page = await pdf.getPage(i);
-          const viewport = page.getViewport({ scale: 0.8 }); // 使用默认 scale
-          sizes.set(i, { width: viewport.width, height: viewport.height });
+        if (pdf.numPages >= 1) {
+          const first = await pdf.getPage(1);
+          const viewport = first.getViewport({ scale: 0.8 });
+          const placeholder = { width: viewport.width, height: viewport.height };
+          for (let i = 1; i <= pdf.numPages; i++) {
+            sizes.set(i, placeholder);
+          }
         }
         setPageSizes(sizes);
-        
+
         setLoading(false);
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error('Failed to load PDF:', err);
         if (!cancelled) {
-          setError(`无法加载 PDF: ${err.message || '未知错误'}`);
+          setError(
+            t('preview.pdf.loadFailed', {
+              error: mapBackendError(err) || t('preview.pdf.unknownError'),
+            })
+          );
           setLoading(false);
         }
       }
@@ -82,7 +92,7 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
     return () => {
       cancelled = true;
     };
-  }, [filePath]);
+  }, [filePath, t]);
 
   // 渲染单页
   const renderPage = useCallback(async (pageNum: number) => {
@@ -97,7 +107,13 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
     try {
       const page = await pdfDoc.getPage(pageNum);
       const viewport = page.getViewport({ scale });
-      
+      const baseViewport = page.getViewport({ scale: 0.8 });
+      setPageSizes((prev) => {
+        const next = new Map(prev);
+        next.set(pageNum, { width: baseViewport.width, height: baseViewport.height });
+        return next;
+      });
+
       const context = canvas.getContext('2d');
       if (!context) return;
 
@@ -108,7 +124,7 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
         canvasContext: context,
         viewport: viewport,
       }).promise;
-      
+
       setRenderedPages(prev => new Set(prev).add(pageNum));
     } catch (err) {
       console.error('Failed to render page:', pageNum, err);
@@ -180,7 +196,7 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
   if (loading) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: 60 }}>
-        <Spin tip="加载 PDF 中..." size="large" />
+        <Spin tip={t('preview.pdf.loading')} size="large" />
       </div>
     );
   }
@@ -188,7 +204,7 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
   if (error) {
     return (
       <Alert
-        message="PDF 预览失败"
+        message={t('preview.pdf.errorTitle')}
         description={error}
         type="error"
         showIcon
@@ -201,7 +217,7 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
       {/* Controls */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          共 {totalPages} 页
+          {t('preview.pdf.pageCount', { count: totalPages })}
         </Text>
         <Space>
           <Button

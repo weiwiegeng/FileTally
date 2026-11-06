@@ -29,20 +29,6 @@ pub struct FileNode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirectoryScanResult {
-    /// Root path that was scanned
-    pub root_path: String,
-    /// List of file nodes
-    pub nodes: Vec<FileNode>,
-    /// Total file count
-    pub total_files: usize,
-    /// Total directory count
-    pub total_dirs: usize,
-    /// Total size in bytes
-    pub total_size: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilePreviewInfo {
     /// Preview type
     pub preview_type: String,

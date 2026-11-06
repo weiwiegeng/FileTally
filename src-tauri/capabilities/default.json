@@ -28,7 +28,17 @@
         "$DOCUMENT/**",
         "$DOWNLOAD/**",
         "$DESKTOP/**",
-        "/**"
+        "$PICTURE/**",
+        "$VIDEO/**",
+        "$AUDIO/**",
+        "$RESOURCE/**",
+        "/Volumes/**",
+        "/tmp/**",
+        "/private/tmp/**",
+        "C:/**",
+        "D:/**",
+        "E:/**",
+        "F:/**"
       ]
     }
   ]

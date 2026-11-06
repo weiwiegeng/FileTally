@@ -109,7 +109,7 @@ export const Settings: React.FC = () => {
     const { aiConfig } = settings;
     
     if (!aiConfig.apiKey && aiConfig.provider !== 'ollama') {
-      message.error('API Key');
+      message.error(t('settings.apiKeyRequired'));
       return;
     }
 
@@ -148,14 +148,14 @@ export const Settings: React.FC = () => {
 
       if (response.ok) {
         setConnectionStatus('success');
-        message.success('连接成功');
+        message.success(t('settings.testSuccess'));
       } else {
         setConnectionStatus('error');
-        message.error(`连接失败: ${response.status}`);
+        message.error(t('settings.testFailedStatus', { status: response.status }));
       }
     } catch (error) {
       setConnectionStatus('error');
-      message.error('连接失败，请检查网络或配置');
+      message.error(t('settings.testFailedNetwork'));
     } finally {
       setTestingConnection(false);
     }
@@ -213,8 +213,8 @@ export const Settings: React.FC = () => {
                     value={settings.language}
                     onChange={(value) => updateSettings({ language: value })}
                     options={[
-                      { value: 'zh-CN', label: '简体中文' },
-                      { value: 'en-US', label: 'English' },
+                      { value: 'zh-CN', label: t('settings.languageZhCN') },
+                      { value: 'en-US', label: t('settings.languageEnUS') },
                     ]}
                   />
                 </Form.Item>
@@ -238,8 +238,11 @@ export const Settings: React.FC = () => {
                     options={[
                       { value: 'disk', label: t('menu.diskMonitor') },
                       { value: 'browser', label: t('menu.fileBrowser') },
-                      { value: 'search', label: t('menu.smartSearch') },
+                      { value: 'filter', label: t('menu.smartSearch') },
                       { value: 'remote', label: t('menu.remoteConnect') },
+                      { value: 'transfer', label: t('menu.fileTransfer') },
+                      { value: 'excel', label: t('menu.excelCheck') },
+                      { value: 'ai', label: t('menu.aiAnalysis') },
                     ]}
                   />
                 </Form.Item>
@@ -284,8 +287,8 @@ export const Settings: React.FC = () => {
                     options={[
                       { value: 'name', label: t('settings.sortByName') },
                       { value: 'size', label: t('settings.sortBySize') },
-                      { value: 'date', label: t('settings.sortByDate') },
-                      { value: 'type', label: t('settings.sortByType') },
+                      { value: 'modified_time', label: t('settings.sortByDate') },
+                      { value: 'extension', label: t('settings.sortByType') },
                     ]}
                   />
                 </Form.Item>
@@ -297,6 +300,17 @@ export const Settings: React.FC = () => {
                     options={[
                       { value: 'asc', label: t('settings.sortAsc') },
                       { value: 'desc', label: t('settings.sortDesc') },
+                    ]}
+                  />
+                </Form.Item>
+
+                <Form.Item label={t('settings.previewPanelPosition')}>
+                  <Select
+                    value={settings.previewPanelPosition}
+                    onChange={(value) => updateSettings({ previewPanelPosition: value })}
+                    options={[
+                      { value: 'right', label: t('settings.previewRight') },
+                      { value: 'bottom', label: t('settings.previewBottom') },
                     ]}
                   />
                 </Form.Item>
@@ -348,7 +362,21 @@ export const Settings: React.FC = () => {
                     value={settings.maxPdfSizeMB}
                     onChange={(value) => updateSettings({ maxPdfSizeMB: value || 30 })}
                     style={{ width: '100%' }}
-                    addonAfter="MB"
+                    addonAfter={t('settings.unitMB')}
+                  />
+                </Form.Item>
+
+                <Form.Item
+                  label={t('settings.maxTextReadLabel')}
+                  tooltip={t('settings.maxTextReadTooltip')}
+                >
+                  <InputNumber
+                    min={1}
+                    max={100}
+                    value={settings.maxTextSizeMB}
+                    onChange={(value) => updateSettings({ maxTextSizeMB: value || 10 })}
+                    style={{ width: '100%' }}
+                    addonAfter={t('settings.unitMB')}
                   />
                 </Form.Item>
 
@@ -362,7 +390,7 @@ export const Settings: React.FC = () => {
                     value={settings.searchTimeout}
                     onChange={(value) => updateSettings({ searchTimeout: value || 60 })}
                     style={{ width: '100%' }}
-                    addonAfter={t('common.loading').includes('加载') ? '秒' : 's'}
+                    addonAfter={t('settings.secondsSuffix')}
                   />
                 </Form.Item>
               </Form>
@@ -427,9 +455,9 @@ export const Settings: React.FC = () => {
               title={
                 <Space>
                   <RobotOutlined style={{ color: colors.accentPurple }} />
-                  <span>AI 配置</span>
+                  <span>{t('settings.aiSectionTitle')}</span>
                   {connectionStatus === 'success' && (
-                    <Tag color="success" icon={<CheckCircleOutlined />}>已连接</Tag>
+                    <Tag color="success" icon={<CheckCircleOutlined />}>{t('settings.aiConnected')}</Tag>
                   )}
                 </Space>
               }
@@ -438,32 +466,32 @@ export const Settings: React.FC = () => {
               <Row gutter={16}>
                 <Col xs={24} md={12}>
                   <Form layout="vertical" size="small">
-                    <Form.Item label="模型提供商">
+                    <Form.Item label={t('settings.modelProvider')}>
                       <Select
                         value={settings.aiConfig.provider}
                         onChange={handleProviderChange}
                         options={[
                           { value: 'openai', label: 'OpenAI' },
                           { value: 'claude', label: 'Claude (Anthropic)' },
-                          { value: 'ollama', label: 'Ollama (本地)' },
-                          { value: 'custom', label: '自定义 API' },
+                          { value: 'ollama', label: t('settings.providerOllamaLocal') },
+                          { value: 'custom', label: t('settings.providerCustom') },
                         ]}
                       />
                     </Form.Item>
 
                     {settings.aiConfig.provider !== 'ollama' && (
-                      <Form.Item label="API Key">
+                      <Form.Item label={t('settings.apiKeyLabel')}>
                         <Input.Password
                           value={settings.aiConfig.apiKey}
                           onChange={(e) => updateSettings({
                             aiConfig: { ...settings.aiConfig, apiKey: e.target.value }
                           })}
-                          placeholder="sk-xxxxx..."
+                          placeholder={t('settings.apiKeyPlaceholder')}
                         />
                       </Form.Item>
                     )}
 
-                    <Form.Item label="API 地址">
+                    <Form.Item label={t('settings.apiEndpoint')}>
                       <Input
                         value={settings.aiConfig.apiEndpoint}
                         onChange={(e) => updateSettings({
@@ -473,14 +501,14 @@ export const Settings: React.FC = () => {
                       />
                     </Form.Item>
 
-                    <Form.Item label="模型">
+                    <Form.Item label={t('settings.model')}>
                       {settings.aiConfig.provider === 'custom' ? (
                         <Input
                           value={settings.aiConfig.model}
                           onChange={(e) => updateSettings({
                             aiConfig: { ...settings.aiConfig, model: e.target.value }
                           })}
-                          placeholder="输入模型名称"
+                          placeholder={t('settings.modelPlaceholder')}
                         />
                       ) : (
                         <Select
@@ -497,7 +525,7 @@ export const Settings: React.FC = () => {
 
                 <Col xs={24} md={12}>
                   <Form layout="vertical" size="small">
-                    <Form.Item label="最大 Token 数">
+                    <Form.Item label={t('settings.maxTokens')}>
                       <InputNumber
                         min={256}
                         max={128000}
@@ -510,7 +538,7 @@ export const Settings: React.FC = () => {
                       />
                     </Form.Item>
 
-                    <Form.Item label={`温度: ${settings.aiConfig.temperature}`}>
+                    <Form.Item label={t('settings.temperatureLabel', { value: settings.aiConfig.temperature })}>
                       <Slider
                         min={0}
                         max={2}
@@ -521,7 +549,7 @@ export const Settings: React.FC = () => {
                         })}
                       />
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        较低的温度产生更确定的输出，较高的温度产生更多样化的输出
+                        {t('settings.temperatureHint')}
                       </Text>
                     </Form.Item>
 
@@ -534,12 +562,12 @@ export const Settings: React.FC = () => {
                         onClick={testConnection}
                         loading={testingConnection}
                       >
-                        测试连接
+                        {t('settings.testConnection')}
                       </Button>
                       <Text type="secondary" style={{ marginLeft: 12, fontSize: 12 }}>
                         {settings.aiConfig.provider === 'ollama'
-                          ? '请确保 Ollama 已启动'
-                          : '点击测试 API 连接是否正常'}
+                          ? t('settings.testHintOllama')
+                          : t('settings.testHintApi')}
                       </Text>
                     </Form.Item>
                   </Form>

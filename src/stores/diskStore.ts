@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { DiskOverview } from '../types';
 import { diskService } from '../services';
+import { mapBackendError } from '../utils/backendError';
 
 interface DiskState {
   diskOverview: DiskOverview | null;
@@ -21,7 +22,7 @@ export const useDiskStore = create<DiskState>((set) => ({
       const overview = await diskService.getDisks();
       set({ diskOverview: overview, loading: false });
     } catch (error) {
-      set({ error: String(error), loading: false });
+      set({ error: mapBackendError(error), loading: false });
     }
   },
 
@@ -31,7 +32,7 @@ export const useDiskStore = create<DiskState>((set) => ({
       const overview = await diskService.refreshDisks();
       set({ diskOverview: overview, loading: false });
     } catch (error) {
-      set({ error: String(error), loading: false });
+      set({ error: mapBackendError(error), loading: false });
     }
   },
 }));

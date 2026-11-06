@@ -9,7 +9,6 @@ import {
   Empty,
   Input,
   message,
-  Spin,
 } from 'antd';
 import {
   CloudServerOutlined,
@@ -18,6 +17,7 @@ import {
   LinkOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import { useRemoteStore, RemoteConnection } from '../../stores';
 import { useThemeColors } from '../../hooks';
 import { invoke } from '@tauri-apps/api/core';
@@ -36,6 +36,7 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
   onClose,
   onSelect,
 }) => {
+  const { t } = useTranslation();
   const { connections } = useRemoteStore();
   const colors = useThemeColors();
   const [selectedConnection, setSelectedConnection] = useState<RemoteConnection | null>(null);
@@ -50,10 +51,11 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
     }
   }, [isOpen]);
 
-  // 获取挂载路径
+  // 优先使用连接时检测到的挂载点
   const getMountPath = (conn: RemoteConnection) => {
-    // macOS SMB 挂载通常在 /Volumes/共享名
-    return `/Volumes/${conn.share}`;
+    if (conn.mountPoint) return conn.mountPoint;
+    if (conn.share) return `/Volumes/${conn.share}`;
+    return `/Volumes/${conn.name}`;
   };
 
   // 检查路径是否存在
@@ -69,42 +71,42 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
   // 选择子目录
   const handleSelectSubFolder = async () => {
     if (!selectedConnection) return;
-    
+
     const basePath = getMountPath(selectedConnection);
-    
+
     try {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: '选择远程目录',
+        title: t('search.remoteFolderSelector.dialogBrowseSubdir'),
         defaultPath: basePath,
       });
-      
+
       if (selected) {
         onSelect(selected as string, selectedConnection?.name);
         onClose();
       }
     } catch (err) {
-      console.error('选择目录失败:', err);
+      console.error('select directory failed:', err);
     }
   };
 
   // 确认选择
   const handleConfirm = async () => {
     if (!selectedConnection) return;
-    
+
     setChecking(true);
     const basePath = getMountPath(selectedConnection);
     const fullPath = subPath ? `${basePath}/${subPath}` : basePath;
-    
+
     const exists = await checkPathExists(fullPath);
     setChecking(false);
-    
+
     if (exists) {
       onSelect(fullPath, selectedConnection?.name);
       onClose();
     } else {
-      message.error('路径不存在，请确认 NAS 已连接并挂载');
+      message.error(t('search.remoteFolderSelector.pathNotExist'));
     }
   };
 
@@ -112,13 +114,13 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
   const getStatusTag = (conn: RemoteConnection) => {
     switch (conn.status) {
       case 'connected':
-        return <Tag color="success">已连接</Tag>;
+        return <Tag color="success">{t('search.remoteFolderSelector.statusConnected')}</Tag>;
       case 'connecting':
-        return <Tag color="processing">连接中</Tag>;
+        return <Tag color="processing">{t('search.remoteFolderSelector.statusConnecting')}</Tag>;
       case 'error':
-        return <Tag color="error">错误</Tag>;
+        return <Tag color="error">{t('search.remoteFolderSelector.statusError')}</Tag>;
       default:
-        return <Tag>未连接</Tag>;
+        return <Tag>{t('search.remoteFolderSelector.statusDisconnected')}</Tag>;
     }
   };
 
@@ -127,7 +129,7 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
       title={
         <Space>
           <CloudServerOutlined style={{ color: colors.accentPurple }} />
-          <span>选择远程目录</span>
+          <span>{t('search.remoteFolderSelector.modalTitle')}</span>
         </Space>
       }
       open={isOpen}
@@ -138,17 +140,15 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
     >
       {connections.length === 0 ? (
         <Empty
-          description="暂无保存的远程连接"
+          description={t('search.remoteFolderSelector.emptyConnections')}
           style={{ padding: '40px 0' }}
         >
-          <Text type="secondary">
-            请先在"远程连接"页面添加 NAS 连接
-          </Text>
+          <Text type="secondary">{t('search.remoteFolderSelector.emptyHint')}</Text>
         </Empty>
       ) : !selectedConnection ? (
         <>
           <Paragraph type="secondary" style={{ marginBottom: 16 }}>
-            选择一个已保存的远程连接：
+            {t('search.remoteFolderSelector.pickConnection')}
           </Paragraph>
           <List
             dataSource={connections}
@@ -205,31 +205,30 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
                   size="small"
                   onClick={() => setSelectedConnection(null)}
                 >
-                  更换
+                  {t('search.remoteFolderSelector.changeConnection')}
                 </Button>
               </Space>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                挂载路径: {getMountPath(selectedConnection)}
+                {t('search.remoteFolderSelector.mountPath', {
+                  path: getMountPath(selectedConnection),
+                })}
               </Text>
             </Space>
           </div>
 
           <Paragraph type="secondary" style={{ marginBottom: 8 }}>
-            输入子目录路径（可选）或直接浏览选择：
+            {t('search.remoteFolderSelector.subdirHint')}
           </Paragraph>
-          
+
           <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
             <Input
-              placeholder="例如: Documents/项目文件"
+              placeholder={t('search.remoteFolderSelector.subdirPlaceholder')}
               value={subPath}
               onChange={(e) => setSubPath(e.target.value)}
               prefix={<FolderOutlined />}
             />
-            <Button
-              icon={<SearchOutlined />}
-              onClick={handleSelectSubFolder}
-            >
-              浏览
+            <Button icon={<SearchOutlined />} onClick={handleSelectSubFolder}>
+              {t('search.remoteFolderSelector.browse')}
             </Button>
           </Space.Compact>
 
@@ -243,19 +242,19 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
           >
             <Text type="secondary" style={{ fontSize: 12 }}>
               <CheckCircleOutlined style={{ color: colors.accentGreen, marginRight: 8 }} />
-              提示：请确保 NAS 已通过 Finder 连接并挂载，挂载后的路径通常在 /Volumes/ 下
+              {t('search.remoteFolderSelector.finderTip')}
             </Text>
           </div>
 
           <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
-            <Button onClick={onClose}>取消</Button>
+            <Button onClick={onClose}>{t('search.remoteFolderSelector.cancel')}</Button>
             <Button
               type="primary"
               icon={<LinkOutlined />}
               onClick={handleConfirm}
               loading={checking}
             >
-              确认选择
+              {t('search.remoteFolderSelector.confirm')}
             </Button>
           </Space>
         </>

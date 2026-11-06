@@ -1,8 +1,7 @@
-use crate::models::{DirectoryScanResult, FileMetadata, FileNode, FilePreviewInfo};
+use crate::models::{FileMetadata, FileNode, FilePreviewInfo};
 use std::fs;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
-use walkdir::WalkDir;
 
 /// Generate a unique ID for file node
 fn generate_id(path: &Path) -> String {
@@ -137,20 +136,21 @@ fn get_mime_type(extension: &str) -> String {
 /// Scan a directory and return first-level children (lazy loading)
 #[tauri::command]
 pub fn scan_directory(path: String) -> Result<Vec<FileNode>, String> {
+    crate::path_util::validate_user_path(&path)?;
     let dir_path = Path::new(&path);
     
     if !dir_path.exists() {
-        return Err(format!("Path does not exist: {}", path));
+        return Err(crate::err::with_detail("path_not_found", &path));
     }
     
     if !dir_path.is_dir() {
-        return Err(format!("Path is not a directory: {}", path));
+        return Err(crate::err::with_detail("path_not_dir", &path));
     }
 
     let mut nodes: Vec<FileNode> = Vec::new();
     
     let entries = fs::read_dir(dir_path)
-        .map_err(|e| format!("Failed to read directory: {}", e))?;
+        .map_err(|e| crate::err::with_detail("read_dir_failed", e))?;
 
     for entry in entries {
         let entry = match entry {
@@ -232,108 +232,18 @@ pub fn scan_directory(path: String) -> Result<Vec<FileNode>, String> {
     Ok(nodes)
 }
 
-/// Scan directory recursively with depth limit
-#[tauri::command]
-pub fn scan_directory_recursive(path: String, max_depth: usize) -> Result<DirectoryScanResult, String> {
-    let dir_path = Path::new(&path);
-    
-    if !dir_path.exists() {
-        return Err(format!("Path does not exist: {}", path));
-    }
-
-    let mut nodes: Vec<FileNode> = Vec::new();
-    let mut total_files: usize = 0;
-    let mut total_dirs: usize = 0;
-    let mut total_size: u64 = 0;
-
-    for entry in WalkDir::new(dir_path)
-        .max_depth(max_depth)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.path() == dir_path {
-            continue; // Skip root
-        }
-        
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        
-        let name = entry.file_name().to_string_lossy().to_string();
-        let is_hidden = name.starts_with('.');
-        let is_dir = metadata.is_dir();
-        
-        if is_dir {
-            total_dirs += 1;
-        } else {
-            total_files += 1;
-            total_size += metadata.len();
-        }
-        
-        let extension = if is_dir {
-            String::new()
-        } else {
-            entry.path()
-                .extension()
-                .map(|e| e.to_string_lossy().to_string())
-                .unwrap_or_default()
-        };
-        
-        let size = if is_dir { 0 } else { metadata.len() };
-        
-        let modified_time = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-            
-        let created_time = metadata
-            .created()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        let node = FileNode {
-            id: generate_id(entry.path()),
-            name,
-            path: entry.path().to_string_lossy().to_string(),
-            is_dir,
-            size,
-            modified_time,
-            created_time,
-            extension,
-            children: None,
-            is_loaded: false,
-            children_count: None,
-            is_hidden,
-        };
-        
-        nodes.push(node);
-    }
-
-    Ok(DirectoryScanResult {
-        root_path: path,
-        nodes,
-        total_files,
-        total_dirs,
-        total_size,
-    })
-}
-
 /// Get file preview information
 #[tauri::command]
 pub fn get_file_preview(path: String) -> Result<FilePreviewInfo, String> {
+    crate::path_util::validate_user_path(&path)?;
     let file_path = Path::new(&path);
     
     if !file_path.exists() {
-        return Err(format!("File does not exist: {}", path));
+        return Err(crate::err::with_detail("file_not_found", &path));
     }
     
     let metadata = fs::metadata(&file_path)
-        .map_err(|e| format!("Failed to get metadata: {}", e))?;
+        .map_err(|e| crate::err::with_detail("read_dir_failed", e))?;
     
     let name = file_path
         .file_name()
@@ -431,7 +341,7 @@ fn extract_pdf_text_safe(path: &Path) -> Option<String> {
 pub fn get_home_dir() -> Result<String, String> {
     dirs::home_dir()
         .map(|p| p.to_string_lossy().to_string())
-        .ok_or_else(|| "Failed to get home directory".to_string())
+        .ok_or_else(|| crate::err::code("home_dir_missing"))
 }
 
 /// Check if a path exists
@@ -450,7 +360,7 @@ pub fn list_volumes() -> Result<Vec<String>, String> {
     }
     
     let entries = fs::read_dir(volumes_path)
-        .map_err(|e| format!("Failed to read /Volumes: {}", e))?;
+        .map_err(|e| crate::err::with_detail("volumes_list_failed", e))?;
     
     let mut volumes = Vec::new();
     for entry in entries {
@@ -478,6 +388,7 @@ pub struct RenameResult {
 /// 重命名文件或文件夹
 #[tauri::command]
 pub fn rename_file(old_path: String, new_name: String) -> Result<RenameResult, String> {
+    crate::path_util::validate_user_path(&old_path)?;
     let old_path = Path::new(&old_path);
     
     // 检查原路径是否存在
@@ -486,34 +397,49 @@ pub fn rename_file(old_path: String, new_name: String) -> Result<RenameResult, S
             success: false,
             new_path: String::new(),
             new_name: String::new(),
-            error: Some("文件或文件夹不存在".to_string()),
+            error: Some(crate::err::code("rename_source_missing")),
         });
     }
     
-    // 检查新名称是否合法
-    if new_name.is_empty() {
-        return Ok(RenameResult {
-            success: false,
-            new_path: String::new(),
-            new_name: String::new(),
-            error: Some("名称不能为空".to_string()),
-        });
-    }
-    
-    // 检查非法字符
-    let invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
-    if new_name.chars().any(|c| invalid_chars.contains(&c)) {
-        return Ok(RenameResult {
-            success: false,
-            new_path: String::new(),
-            new_name: String::new(),
-            error: Some("名称包含非法字符 (/ \\ : * ? \" < > |)".to_string()),
-        });
-    }
+    let trimmed = match crate::path_util::validate_file_name(&new_name) {
+        Ok(name) => name,
+        Err(msg) => {
+            return Ok(RenameResult {
+                success: false,
+                new_path: String::new(),
+                new_name: String::new(),
+                error: Some(msg),
+            });
+        }
+    };
     
     // 构建新路径
-    let parent = old_path.parent().ok_or("无法获取父目录")?;
-    let new_path = parent.join(&new_name);
+    let parent = old_path.parent().ok_or_else(|| crate::err::code("rename_no_parent"))?;
+    let new_path = parent.join(trimmed);
+
+    // 确保仍在同一父目录内（防止路径穿越）
+    let canonical_parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+    if let Ok(canonical_new) = new_path.canonicalize() {
+        if canonical_new.parent() != Some(canonical_parent.as_path()) {
+            return Ok(RenameResult {
+                success: false,
+                new_path: String::new(),
+                new_name: String::new(),
+                error: Some(crate::err::code("rename_path_escape")),
+            });
+        }
+    } else {
+        // 新路径尚不存在时，检查 join 后的父路径
+        let joined_parent = new_path.parent().map(|p| p.to_path_buf());
+        if joined_parent.as_deref() != Some(parent) {
+            return Ok(RenameResult {
+                success: false,
+                new_path: String::new(),
+                new_name: String::new(),
+                error: Some(crate::err::code("rename_path_escape")),
+            });
+        }
+    }
     
     // 检查新路径是否已存在
     if new_path.exists() {
@@ -521,7 +447,7 @@ pub fn rename_file(old_path: String, new_name: String) -> Result<RenameResult, S
             success: false,
             new_path: String::new(),
             new_name: String::new(),
-            error: Some("同名文件或文件夹已存在".to_string()),
+            error: Some(crate::err::code("rename_target_exists")),
         });
     }
     
@@ -530,14 +456,14 @@ pub fn rename_file(old_path: String, new_name: String) -> Result<RenameResult, S
         Ok(_) => Ok(RenameResult {
             success: true,
             new_path: new_path.to_string_lossy().to_string(),
-            new_name,
+            new_name: trimmed.to_string(),
             error: None,
         }),
         Err(e) => Ok(RenameResult {
             success: false,
             new_path: String::new(),
             new_name: String::new(),
-            error: Some(format!("重命名失败: {}", e)),
+            error: Some(crate::err::with_detail("rename_failed", e)),
         }),
     }
 }

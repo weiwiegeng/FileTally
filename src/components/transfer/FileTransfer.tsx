@@ -16,6 +16,7 @@ import {
   Divider,
   Result,
   Segmented,
+  message,
 } from 'antd';
 import {
   UploadOutlined,
@@ -35,6 +36,7 @@ import {
   DownloadOutlined,
   DesktopOutlined,
 } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
@@ -43,6 +45,7 @@ import { useThemeColors } from '../../hooks';
 import { RemoteFolderSelector } from '../search/RemoteFolderSelector';
 import { ConflictModal } from './ConflictModal';
 import { getPathName } from '../../utils/format';
+import { mapBackendError } from '../../utils/backendError';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -55,6 +58,7 @@ interface FileInfo {
 }
 
 export const FileTransfer: React.FC = () => {
+  const { t } = useTranslation();
   const {
     direction,
     sourceItems,
@@ -74,6 +78,7 @@ export const FileTransfer: React.FC = () => {
     clearTargetPath,
     checkConflicts,
     startTransfer,
+    cancelTransfer,
     reset,
     setProgress,
   } = useTransferStore();
@@ -98,7 +103,7 @@ export const FileTransfer: React.FC = () => {
         stage: string;
         message: string;
       }>('transfer-progress', (event) => {
-        const { currentFile, currentIndex, totalFiles, stage, message } = event.payload;
+        const { currentFile, currentIndex, totalFiles, stage } = event.payload;
         
         if (stage === 'counting') {
           setProgress({
@@ -108,6 +113,15 @@ export const FileTransfer: React.FC = () => {
             bytesTransferred: 0,
             totalBytes: 0,
             percentage: 0,
+          });
+        } else if (stage === 'cancelled') {
+          setProgress({
+            currentFile: t('progress.cancelled'),
+            currentIndex,
+            totalFiles,
+            bytesTransferred: 0,
+            totalBytes: 0,
+            percentage: totalFiles > 0 ? Math.round((currentIndex / totalFiles) * 100) : 0,
           });
         } else {
           const percentage = totalFiles > 0 ? Math.round((currentIndex / totalFiles) * 100) : 0;
@@ -130,7 +144,7 @@ export const FileTransfer: React.FC = () => {
         unlisten();
       }
     };
-  }, [setProgress]);
+  }, [setProgress, t]);
 
   // 选择本地文件
   const handleSelectFiles = async () => {
@@ -138,13 +152,17 @@ export const FileTransfer: React.FC = () => {
       const selected = await open({
         multiple: true,
         directory: false,
-        title: direction === 'upload' ? '选择要上传的文件' : '选择保存位置',
+        title:
+          direction === 'upload'
+            ? t('transfer.dialogSelectUploadFiles')
+            : t('transfer.dialogSelectSaveLocation'),
       });
       
       if (selected) {
         const paths = Array.isArray(selected) ? selected : [selected];
         const items: TransferItem[] = [];
         
+        const loadErrors: string[] = [];
         for (const path of paths) {
           try {
             const info = await invoke<{ size: number; sizeFormatted: string; isDir: boolean; name: string }>('get_path_info', { path });
@@ -156,15 +174,20 @@ export const FileTransfer: React.FC = () => {
               size: info.size,
               sizeFormatted: info.sizeFormatted,
             });
-          } catch {
-            // 忽略错误，继续处理其他文件
+          } catch (err) {
+            loadErrors.push(`${path}: ${mapBackendError(err)}`);
           }
         }
-        
-        addSourceItems(items);
+
+        if (items.length) {
+          addSourceItems(items);
+        }
+        if (loadErrors.length) {
+          message.error(loadErrors.join('; '));
+        }
       }
     } catch (err) {
-      console.error('选择文件失败:', err);
+      message.error(mapBackendError(err));
     }
   };
 
@@ -174,7 +197,10 @@ export const FileTransfer: React.FC = () => {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: direction === 'upload' ? '选择要上传的文件夹' : '选择保存位置',
+        title:
+          direction === 'upload'
+            ? t('transfer.dialogSelectUploadFolder')
+            : t('transfer.dialogSelectSaveLocation'),
       });
       
       if (selected) {
@@ -203,8 +229,8 @@ export const FileTransfer: React.FC = () => {
             expanded: true,
             level: 0,
           }]);
-        } catch {
-          // 如果获取信息失败，使用默认值
+        } catch (err) {
+          message.error(mapBackendError(err));
           const name = getPathName(selected as string) || selected;
           addSourceItems([{
             id: '',
@@ -212,13 +238,13 @@ export const FileTransfer: React.FC = () => {
             fileName: name as string,
             fileType: 'folder',
             size: 0,
-            sizeFormatted: '计算中...',
+            sizeFormatted: t('transfer.sizeCalculating'),
             level: 0,
           }]);
         }
       }
     } catch (err) {
-      console.error('选择文件夹失败:', err);
+      message.error(mapBackendError(err));
     }
   };
 
@@ -248,7 +274,7 @@ export const FileTransfer: React.FC = () => {
           }));
           setFolderContents(prev => new Map(prev).set(folderId, children));
         } catch (err) {
-          console.error('加载文件夹内容失败:', err);
+          message.error(mapBackendError(err));
         } finally {
           setLoadingFolders(prev => {
             const next = new Set(prev);
@@ -264,9 +290,12 @@ export const FileTransfer: React.FC = () => {
 
   // 开始传输
   const handleStartTransfer = async () => {
-    const hasConflicts = await checkConflicts();
-    if (!hasConflicts) {
-      // 无冲突，直接开始传输
+    const checkResult = await checkConflicts();
+    if (checkResult === 'error') {
+      // 校验失败时不启动传输，避免误覆盖
+      return;
+    }
+    if (checkResult === 'none') {
       startTransfer('overwrite');
     }
     // 有冲突时会自动显示冲突弹窗
@@ -303,21 +332,21 @@ export const FileTransfer: React.FC = () => {
             <DownloadOutlined style={{ fontSize: 24, color: colors.accentGreen }} />
           )}
           <Title level={4} style={{ margin: 0, color: colors.textPrimary }}>
-            文件传输
+            {t('transfer.title')}
           </Title>
         </Space>
         <Space>
           <Segmented
             options={[
-              { label: '上传', value: 'upload', icon: <UploadOutlined /> },
-              { label: '下载', value: 'download', icon: <DownloadOutlined /> },
+              { label: t('transfer.directionUpload'), value: 'upload', icon: <UploadOutlined /> },
+              { label: t('transfer.directionDownload'), value: 'download', icon: <DownloadOutlined /> },
             ]}
             value={direction}
             onChange={(val) => setDirection(val as TransferDirection)}
           />
           {(sourceItems.length > 0 || targetPath) && (
             <Button icon={<ReloadOutlined />} onClick={reset}>
-              重置
+              {t('transfer.reset')}
             </Button>
           )}
         </Space>
@@ -328,13 +357,43 @@ export const FileTransfer: React.FC = () => {
         {/* 传输结果 */}
         {result && (
           <Alert
-            type={result.success ? 'success' : 'warning'}
-            message={result.success ? '传输完成' : '传输完成（部分失败）'}
+            type={
+              result.cancelled
+                ? 'info'
+                : result.truncated
+                  ? 'warning'
+                  : result.success
+                    ? 'success'
+                    : 'warning'
+            }
+            message={
+              result.cancelled
+                ? t('transfer.resultCancelled')
+                : result.truncated
+                  ? t('transfer.resultTruncated')
+                  : result.success
+                    ? t('transfer.resultComplete')
+                    : t('transfer.resultPartialFail')
+            }
             description={
               <Space direction="vertical">
-                <Text>成功: {result.transferred} 个文件</Text>
-                {result.skipped > 0 && <Text>跳过: {result.skipped} 个文件</Text>}
-                {result.failed > 0 && <Text type="danger">失败: {result.failed} 个文件</Text>}
+                {result.cancelled ? (
+                  <Text>
+                    {t('transfer.resultCancelledDetail', { count: result.transferred })}
+                  </Text>
+                ) : result.truncated ? (
+                  <Text>
+                    {t('transfer.resultTruncatedDetail', { count: result.transferred })}
+                  </Text>
+                ) : (
+                  <Text>{t('transfer.resultSuccess', { count: result.transferred })}</Text>
+                )}
+                {result.skipped > 0 && (
+                  <Text>{t('transfer.resultSkipped', { count: result.skipped })}</Text>
+                )}
+                {result.failed > 0 && (
+                  <Text type="danger">{t('transfer.resultFailed', { count: result.failed })}</Text>
+                )}
                 {result.errors.length > 0 && (
                   <div>
                     {result.errors.map((err, idx) => (
@@ -355,7 +414,7 @@ export const FileTransfer: React.FC = () => {
         {error && (
           <Alert
             type="error"
-            message="传输错误"
+            message={t('transfer.errorAlert')}
             description={error}
             showIcon
             closable
@@ -372,12 +431,12 @@ export const FileTransfer: React.FC = () => {
                   {direction === 'upload' ? (
                     <>
                       <FolderOpenOutlined style={{ color: colors.accentOrange }} />
-                      <span>本地文件</span>
+                      <span>{t('transfer.sourceLocal')}</span>
                     </>
                   ) : (
                     <>
                       <CloudServerOutlined style={{ color: colors.accentPurple }} />
-                      <span>远程文件 (NAS)</span>
+                      <span>{t('transfer.sourceRemote')}</span>
                       {sourceConnectionName && (
                         <Tag color="purple" style={{ marginLeft: 8 }}>{sourceConnectionName}</Tag>
                       )}
@@ -393,14 +452,14 @@ export const FileTransfer: React.FC = () => {
                       onClick={handleSelectFiles}
                       size="small"
                     >
-                      选择文件
+                      {t('transfer.selectFiles')}
                     </Button>
                     <Button
                       icon={<FolderOutlined />}
                       onClick={handleSelectFolder}
                       size="small"
                     >
-                      选择文件夹
+                      {t('transfer.selectFolder')}
                     </Button>
                   </Space>
                 ) : (
@@ -410,7 +469,7 @@ export const FileTransfer: React.FC = () => {
                     size="small"
                     disabled={connections.length === 0}
                   >
-                    选择远程文件
+                    {t('transfer.selectRemoteFiles')}
                   </Button>
                 )
               }
@@ -421,12 +480,16 @@ export const FileTransfer: React.FC = () => {
                 direction === 'download' && connections.length === 0 ? (
                   <Empty
                     image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description="请先在远程连接页面添加 NAS 连接"
+                    description={t('transfer.emptyNeedNas')}
                   />
                 ) : (
                   <Empty
                     image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description={direction === 'upload' ? "点击上方按钮选择要上传的文件或文件夹" : "点击上方按钮选择要下载的远程文件"}
+                    description={
+                      direction === 'upload'
+                        ? t('transfer.emptySelectUpload')
+                        : t('transfer.emptySelectDownload')
+                    }
                   />
                 )
               ) : (
@@ -475,7 +538,7 @@ export const FileTransfer: React.FC = () => {
                           
                           {/* 大小 */}
                           <Text type="secondary" style={{ fontSize: 12, marginLeft: 8, minWidth: 70, textAlign: 'right' }}>
-                            {item.sizeFormatted || '计算中...'}
+                            {item.sizeFormatted || t('transfer.sizeCalculating')}
                           </Text>
                           
                           {/* 删除按钮（只显示在顶级） */}
@@ -585,11 +648,12 @@ export const FileTransfer: React.FC = () => {
             {sourceItems.length > 0 && (
               <div style={{ marginTop: 12, display: 'flex', justifyContent: 'space-between' }}>
                 <Text type="secondary">
-                  已选择 {sourceItems.length} 个项目
-                  {totalSize > 0 && `，共 ${formatSize(totalSize)}`}
+                  {t('transfer.selectedSummary', { count: sourceItems.length })}
+                  {totalSize > 0 &&
+                    t('transfer.selectedTotalSize', { size: formatSize(totalSize) })}
                 </Text>
                 <Button size="small" danger onClick={clearSourceItems}>
-                  清空列表
+                  {t('transfer.clearList')}
                 </Button>
               </div>
             )}
@@ -603,12 +667,12 @@ export const FileTransfer: React.FC = () => {
                   {direction === 'upload' ? (
                     <>
                       <CloudServerOutlined style={{ color: colors.accentPurple }} />
-                      <span>远程目标 (NAS)</span>
+                      <span>{t('transfer.targetRemote')}</span>
                     </>
                   ) : (
                     <>
                       <DesktopOutlined style={{ color: colors.accentOrange }} />
-                      <span>本地目标</span>
+                      <span>{t('transfer.targetLocal')}</span>
                     </>
                   )}
                 </Space>
@@ -621,7 +685,7 @@ export const FileTransfer: React.FC = () => {
                     size="small"
                     disabled={connections.length === 0}
                   >
-                    选择目录
+                    {t('transfer.selectDirectory')}
                   </Button>
                 ) : (
                   <Button
@@ -630,7 +694,7 @@ export const FileTransfer: React.FC = () => {
                       const selected = await open({
                         directory: true,
                         multiple: false,
-                        title: '选择保存位置',
+                        title: t('transfer.dialogSelectSaveLocation'),
                       });
                       if (selected) {
                         setTargetPath(selected as string);
@@ -638,7 +702,7 @@ export const FileTransfer: React.FC = () => {
                     }}
                     size="small"
                   >
-                    选择目录
+                    {t('transfer.selectDirectory')}
                   </Button>
                 )
               }
@@ -648,12 +712,12 @@ export const FileTransfer: React.FC = () => {
               {direction === 'upload' && connections.length === 0 ? (
                 <Empty
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="请先在远程连接页面添加 NAS 连接"
+                  description={t('transfer.emptyNeedNas')}
                 />
               ) : !targetPath ? (
                 <Empty
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="点击上方按钮选择目标目录"
+                  description={t('transfer.emptySelectTarget')}
                 />
               ) : (
                 <div style={{ textAlign: 'center' }}>
@@ -679,7 +743,7 @@ export const FileTransfer: React.FC = () => {
                     onClick={clearTargetPath}
                     style={{ marginTop: 8 }}
                   >
-                    更换目录
+                    {t('transfer.changeDirectory')}
                   </Button>
                 </div>
               )}
@@ -693,10 +757,11 @@ export const FileTransfer: React.FC = () => {
             <Space direction="vertical" style={{ width: '100%' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                 <Text>
-                  {progress.totalFiles === 0 
-                    ? '正在统计文件数量...' 
-                    : `正在传输: ${progress.currentFile || '准备中...'}`
-                  }
+                  {progress.totalFiles === 0
+                    ? t('transfer.progressCounting')
+                    : t('transfer.progressTransferring', {
+                        file: progress.currentFile || t('transfer.progressPreparing'),
+                      })}
                 </Text>
                 <Text type="secondary">
                   {progress.totalFiles > 0 
@@ -708,8 +773,17 @@ export const FileTransfer: React.FC = () => {
               <Progress 
                 percent={progress.percentage} 
                 status="active" 
-                format={(percent) => progress.totalFiles === 0 ? '统计中' : `${percent}%`}
+                format={(percent) =>
+                  progress.totalFiles === 0
+                    ? t('transfer.progressCountingShort')
+                    : `${percent}%`
+                }
               />
+              <div style={{ textAlign: 'right' }}>
+                <Button danger onClick={() => cancelTransfer()}>
+                  {t('transfer.cancelTransfer')}
+                </Button>
+              </div>
             </Space>
           </Card>
         )}
@@ -722,10 +796,14 @@ export const FileTransfer: React.FC = () => {
             icon={direction === 'upload' ? <UploadOutlined /> : <DownloadOutlined />}
             onClick={handleStartTransfer}
             loading={loading || transferring}
-            disabled={sourceItems.length === 0 || !targetPath}
+            disabled={sourceItems.length === 0 || !targetPath || transferring}
             style={{ minWidth: 200 }}
           >
-            {transferring ? '传输中...' : direction === 'upload' ? '开始上传' : '开始下载'}
+            {transferring
+              ? t('transfer.transferring')
+              : direction === 'upload'
+                ? t('transfer.startUpload')
+                : t('transfer.startDownload')}
           </Button>
         </div>
       </div>

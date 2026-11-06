@@ -36,23 +36,38 @@ fn format_size(size: u64) -> String {
     }
 }
 
-/// Calculate simple hash for duplicate detection (based on size + first bytes)
+/// Duplicate fingerprint: SHA-256 over size + head 64KB + mid 4KB + tail 4KB.
 fn calculate_file_hash(path: &Path, size: u64) -> Option<String> {
-    use std::io::Read;
-    
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom};
+
     let mut file = fs::File::open(path).ok()?;
-    let mut buffer = [0u8; 4096];
-    let bytes_read = file.read(&mut buffer).ok()?;
-    
-    // Simple hash: size + first bytes hash
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    
-    let mut hasher = DefaultHasher::new();
-    size.hash(&mut hasher);
-    buffer[..bytes_read].hash(&mut hasher);
-    
-    Some(format!("{:x}", hasher.finish()))
+    let mut hasher = Sha256::new();
+    hasher.update(size.to_le_bytes());
+
+    let mut head = vec![0u8; 64 * 1024];
+    let head_read = file.read(&mut head).ok()?;
+    hasher.update(&head[..head_read]);
+
+    if size > 64 * 1024 + 8192 {
+        let mid_pos = size / 2;
+        file.seek(SeekFrom::Start(mid_pos.saturating_sub(2048))).ok()?;
+        let mut mid = [0u8; 4096];
+        let mid_read = file.read(&mut mid).ok()?;
+        hasher.update(&mid[..mid_read]);
+
+        file.seek(SeekFrom::End(-4096)).ok()?;
+        let mut tail = [0u8; 4096];
+        let tail_read = file.read(&mut tail).ok()?;
+        hasher.update(&tail[..tail_read]);
+    } else if size > 64 * 1024 {
+        file.seek(SeekFrom::End(-4096.min(size as i64))).ok()?;
+        let mut tail = [0u8; 4096];
+        let tail_read = file.read(&mut tail).ok()?;
+        hasher.update(&tail[..tail_read]);
+    }
+
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,7 +104,9 @@ pub struct OldFile {
     pub name: String,
     pub size: u64,
     pub size_formatted: String,
-    pub last_accessed_days: u64,
+    /// Days since last modification (field historically misnamed as accessed).
+    #[serde(rename = "lastModifiedDays", alias = "lastAccessedDays")]
+    pub last_modified_days: u64,
     pub modified_time: u64,
 }
 
@@ -106,6 +123,7 @@ pub struct FolderAnalysisResult {
     pub duplicate_groups: Vec<DuplicateGroup>,
     pub old_files: Vec<OldFile>,
     pub analyzed_at: u64,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -131,36 +149,58 @@ pub struct CleanupSuggestion {
     pub analyzed_at: u64,
 }
 
+const ANALYSIS_MAX_DEPTH: usize = 32;
+const ANALYSIS_MAX_ENTRIES: u64 = 200_000;
+
 /// Analyze a folder and return statistics
 #[tauri::command]
-pub fn analyze_folder(app: AppHandle, path: String, large_file_threshold_mb: u64, old_file_days: u64) -> Result<FolderAnalysisResult, String> {
+pub async fn analyze_folder(
+    app: AppHandle,
+    path: String,
+    large_file_threshold_mb: u64,
+    old_file_days: u64,
+) -> Result<FolderAnalysisResult, String> {
+    tokio::task::spawn_blocking(move || analyze_folder_sync(app, path, large_file_threshold_mb, old_file_days))
+        .await
+        .map_err(|e| crate::err::with_detail("analysis_task_failed", e))?
+}
+
+fn analyze_folder_sync(
+    app: AppHandle,
+    path: String,
+    large_file_threshold_mb: u64,
+    old_file_days: u64,
+) -> Result<FolderAnalysisResult, String> {
     let dir_path = Path::new(&path);
     
+    crate::path_util::validate_user_path(&path)?;
     if !dir_path.exists() {
-        return Err(format!("Path does not exist: {}", path));
+        return Err(crate::err::with_detail("path_not_found", &path));
     }
     
     if !dir_path.is_dir() {
-        return Err(format!("Path is not a directory: {}", path));
+        return Err(crate::err::with_detail("path_not_dir", &path));
     }
 
-    // 第一阶段：统计文件数量
     let _ = app.emit("analysis-progress", AnalysisProgress {
         stage: "counting".to_string(),
         current: 0,
         total: 0,
-        message: "正在统计文件数量...".to_string(),
+        message: String::new(),
     });
 
     let total_entries: u64 = WalkDir::new(dir_path)
+        .follow_links(false)
+        .max_depth(ANALYSIS_MAX_DEPTH)
         .into_iter()
         .filter_map(|e| e.ok())
+        .take(ANALYSIS_MAX_ENTRIES as usize)
         .count() as u64;
 
     let large_file_threshold = large_file_threshold_mb * 1024 * 1024;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
     let old_threshold_secs = old_file_days * 24 * 60 * 60;
 
@@ -174,21 +214,27 @@ pub fn analyze_folder(app: AppHandle, path: String, large_file_threshold_mb: u64
     
     let mut processed: u64 = 0;
     let mut last_emit: u64 = 0;
+    let mut truncated = false;
 
     for entry in WalkDir::new(dir_path)
+        .follow_links(false)
+        .max_depth(ANALYSIS_MAX_DEPTH)
         .into_iter()
         .filter_map(|e| e.ok())
     {
         processed += 1;
+        if processed > ANALYSIS_MAX_ENTRIES {
+            truncated = true;
+            break;
+        }
         
-        // 每处理100个文件或达到1%时发送进度
         if processed - last_emit >= 100 || (total_entries > 0 && processed * 100 / total_entries > last_emit * 100 / total_entries.max(1)) {
             last_emit = processed;
             let _ = app.emit("analysis-progress", AnalysisProgress {
                 stage: "analyzing".to_string(),
                 current: processed,
                 total: total_entries,
-                message: format!("正在分析文件 {}/{}", processed, total_entries),
+                message: String::new(),
             });
         }
         
@@ -217,7 +263,7 @@ pub fn analyze_folder(app: AppHandle, path: String, large_file_threshold_mb: u64
         let extension = entry.path()
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
-            .unwrap_or_else(|| "无扩展名".to_string());
+            .unwrap_or_else(|| "(none)".to_string());
         
         let stats = type_stats.entry(extension).or_insert((0, 0));
         stats.0 += 1;
@@ -252,7 +298,7 @@ pub fn analyze_folder(app: AppHandle, path: String, large_file_threshold_mb: u64
                     name: name.clone(),
                     size,
                     size_formatted: format_size(size),
-                    last_accessed_days: days,
+                    last_modified_days: days,
                     modified_time,
                 });
             }
@@ -287,7 +333,7 @@ pub fn analyze_folder(app: AppHandle, path: String, large_file_threshold_mb: u64
     large_files.truncate(20);
     
     // Sort old files by age descending, take top 50
-    old_files.sort_by(|a, b| b.last_accessed_days.cmp(&a.last_accessed_days));
+    old_files.sort_by(|a, b| b.last_modified_days.cmp(&a.last_modified_days));
     old_files.truncate(50);
     
     // Find duplicates (groups with more than 1 file)
@@ -313,12 +359,11 @@ pub fn analyze_folder(app: AppHandle, path: String, large_file_threshold_mb: u64
     });
     duplicate_groups.truncate(20);
 
-    // 发送完成事件
     let _ = app.emit("analysis-progress", AnalysisProgress {
         stage: "complete".to_string(),
         current: total_entries,
         total: total_entries,
-        message: "分析完成".to_string(),
+        message: String::new(),
     });
 
     Ok(FolderAnalysisResult {
@@ -332,6 +377,7 @@ pub fn analyze_folder(app: AppHandle, path: String, large_file_threshold_mb: u64
         duplicate_groups,
         old_files,
         analyzed_at: now,
+        truncated,
     })
 }
 
@@ -339,11 +385,11 @@ pub fn analyze_folder(app: AppHandle, path: String, large_file_threshold_mb: u64
 #[tauri::command]
 pub fn scan_cleanup_suggestions() -> Result<CleanupSuggestion, String> {
     let home_dir = dirs::home_dir()
-        .ok_or_else(|| "Failed to get home directory".to_string())?;
+        .ok_or_else(|| crate::err::code("home_dir_missing"))?;
     
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
 
     let mut cache_files: Vec<CleanupItem> = Vec::new();
@@ -378,7 +424,7 @@ pub fn scan_cleanup_suggestions() -> Result<CleanupSuggestion, String> {
                                 name: entry.file_name().to_string_lossy().to_string(),
                                 size,
                                 size_formatted: format_size(size),
-                                description: "应用缓存".to_string(),
+                                description: "cache".to_string(),
                             });
                             total_size += size;
                         }
@@ -404,9 +450,9 @@ pub fn scan_cleanup_suggestions() -> Result<CleanupSuggestion, String> {
                     .unwrap_or_else(|| temp_path.to_string_lossy().to_string());
                 
                 let description = if name == ".Trash" {
-                    "废纸篓"
+                    "trash"
                 } else {
-                    "临时文件"
+                    "temp"
                 };
                 
                 temp_files.push(CleanupItem {
@@ -451,7 +497,7 @@ pub fn scan_cleanup_suggestions() -> Result<CleanupSuggestion, String> {
                                 name: entry.file_name().to_string_lossy().to_string(),
                                 size,
                                 size_formatted: format_size(size),
-                                description: format!("超过30天未修改"),
+                                description: "download_old".to_string(),
                             });
                             total_size += size;
                         }
@@ -485,7 +531,7 @@ pub fn scan_cleanup_suggestions() -> Result<CleanupSuggestion, String> {
                                 name: entry.file_name().to_string_lossy().to_string(),
                                 size,
                                 size_formatted: format_size(size),
-                                description: "日志文件".to_string(),
+                                description: "log".to_string(),
                             });
                             total_size += size;
                         }

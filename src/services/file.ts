@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { FileNode, FilePreviewInfo } from '../types';
+import i18n from '../i18n';
 
 export const fileService = {
   /**
@@ -31,7 +32,7 @@ export const fileService = {
     const selected = await open({
       directory: true,
       multiple: false,
-      title: '选择文件夹',
+      title: i18n.t('browser.fileBrowser.selectFolder'),
     });
     return selected as string | null;
   },
@@ -43,7 +44,7 @@ export const fileService = {
     const selected = await open({
       directory: true,
       multiple: true,
-      title: '选择文件夹（可多选）',
+      title: i18n.t('browser.fileBrowser.selectFolderMultiple'),
     });
     if (!selected) return [];
     return Array.isArray(selected) ? selected : [selected];

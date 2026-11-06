@@ -14,7 +14,9 @@ import {
   Tag,
   List,
   Collapse,
+  message,
 } from 'antd';
+import { mapBackendError } from '../../utils/backendError';
 import {
   DeleteOutlined,
   ThunderboltOutlined,
@@ -28,6 +30,7 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import { useAnalysisStore, CleanupSuggestion, CleanupItem } from '../../stores';
 import { useThemeColors } from '../../hooks';
+import { useTranslation } from 'react-i18next';
 
 const { Text, Title } = Typography;
 
@@ -41,6 +44,7 @@ export const CleanupSuggestionTab: React.FC = () => {
     clearCleanupSuggestion,
   } = useAnalysisStore();
   const colors = useThemeColors();
+  const { t } = useTranslation();
 
   const handleScan = async () => {
     scanCleanupStart();
@@ -48,9 +52,15 @@ export const CleanupSuggestionTab: React.FC = () => {
       const result = await invoke<CleanupSuggestion>('scan_cleanup_suggestions');
       scanCleanupSuccess(result);
     } catch (err) {
-      console.error('扫描失败:', err);
+      console.error('cleanup scan failed:', err);
       scanCleanupError();
+      message.error(t('analysis.cleanup.scanFailed', { error: mapBackendError(err) }));
     }
+  };
+
+  const describeItem = (description: string) => {
+    const key = `analysis.cleanup.desc.${description}`;
+    return t(key, { defaultValue: description });
   };
 
   const getCategoryIcon = (category: string) => {
@@ -134,7 +144,7 @@ export const CleanupSuggestionTab: React.FC = () => {
                 description={
                   <Space>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      {item.description}
+                      {describeItem(item.description)}
                     </Text>
                     <Tag>{item.sizeFormatted}</Tag>
                   </Space>
@@ -159,16 +169,16 @@ export const CleanupSuggestionTab: React.FC = () => {
           onClick={handleScan}
           loading={cleanupLoading}
         >
-          扫描系统
+          {t('analysis.cleanup.scanSystem')}
         </Button>
         
         {cleanupSuggestion && (
           <>
             <Button icon={<ReloadOutlined />} onClick={handleScan}>
-              重新扫描
+              {t('analysis.cleanup.rescan')}
             </Button>
             <Button onClick={clearCleanupSuggestion}>
-              清除结果
+              {t('analysis.cleanup.clearResults')}
             </Button>
           </>
         )}
@@ -179,7 +189,7 @@ export const CleanupSuggestionTab: React.FC = () => {
         <div style={{ textAlign: 'center', padding: 100 }}>
           <Spin size="large" />
           <div style={{ marginTop: 16 }}>
-            <Text type="secondary">正在扫描系统，请稍候...</Text>
+            <Text type="secondary">{t('analysis.cleanup.scanning')}</Text>
           </div>
         </div>
       ) : cleanupSuggestion ? (
@@ -195,7 +205,7 @@ export const CleanupSuggestionTab: React.FC = () => {
             <Row gutter={16} align="middle">
               <Col span={8}>
                 <Statistic
-                  title={<Text style={{ color: colors.textSecondary }}>预计可释放空间</Text>}
+                  title={<Text style={{ color: colors.textSecondary }}>{t('analysis.cleanup.statReclaimable')}</Text>}
                   value={cleanupSuggestion.totalCleanableSizeFormatted}
                   valueStyle={{ color: colors.accentGreen, fontSize: 32 }}
                   prefix={<ClearOutlined />}
@@ -205,33 +215,33 @@ export const CleanupSuggestionTab: React.FC = () => {
                 <Row gutter={16}>
                   <Col span={6}>
                     <Statistic
-                      title="缓存文件"
+                      title={t('analysis.cleanup.statCache')}
                       value={cleanupSuggestion.cacheFiles.length}
-                      suffix="项"
+                      suffix={t('analysis.cleanup.suffixItems')}
                       valueStyle={{ fontSize: 20 }}
                     />
                   </Col>
                   <Col span={6}>
                     <Statistic
-                      title="临时文件"
+                      title={t('analysis.cleanup.statTemp')}
                       value={cleanupSuggestion.tempFiles.length}
-                      suffix="项"
+                      suffix={t('analysis.cleanup.suffixItems')}
                       valueStyle={{ fontSize: 20 }}
                     />
                   </Col>
                   <Col span={6}>
                     <Statistic
-                      title="下载残留"
+                      title={t('analysis.cleanup.statDownloads')}
                       value={cleanupSuggestion.downloadFiles.length}
-                      suffix="项"
+                      suffix={t('analysis.cleanup.suffixItems')}
                       valueStyle={{ fontSize: 20 }}
                     />
                   </Col>
                   <Col span={6}>
                     <Statistic
-                      title="日志文件"
+                      title={t('analysis.cleanup.statLogs')}
                       value={cleanupSuggestion.logFiles.length}
-                      suffix="项"
+                      suffix={t('analysis.cleanup.suffixItems')}
                       valueStyle={{ fontSize: 20 }}
                     />
                   </Col>
@@ -250,7 +260,7 @@ export const CleanupSuggestionTab: React.FC = () => {
             size="small"
           >
             <Text type="warning">
-              注意：清理操作需谨慎，建议先查看文件内容确认后再手动删除。部分缓存文件删除后可能需要重新下载。
+              {t('analysis.cleanup.warning')}
             </Text>
           </Card>
 
@@ -260,13 +270,13 @@ export const CleanupSuggestionTab: React.FC = () => {
               {renderCleanupList(
                 cleanupSuggestion.cacheFiles,
                 'cache',
-                '应用缓存',
+                t('analysis.cleanup.categoryCache'),
                 <FolderOutlined style={{ color: colors.accentBlue }} />
               )}
               {renderCleanupList(
                 cleanupSuggestion.tempFiles,
                 'temp',
-                '临时文件 / 废纸篓',
+                t('analysis.cleanup.categoryTemp'),
                 <DeleteOutlined style={{ color: colors.accentOrange }} />
               )}
             </Col>
@@ -274,13 +284,13 @@ export const CleanupSuggestionTab: React.FC = () => {
               {renderCleanupList(
                 cleanupSuggestion.downloadFiles,
                 'download',
-                '下载文件夹 (30天未修改)',
+                t('analysis.cleanup.categoryDownloads'),
                 <DownloadOutlined style={{ color: colors.accentGreen }} />
               )}
               {renderCleanupList(
                 cleanupSuggestion.logFiles,
                 'log',
-                '日志文件',
+                t('analysis.cleanup.categoryLogs'),
                 <FileTextOutlined style={{ color: colors.accentPurple }} />
               )}
             </Col>
@@ -290,7 +300,7 @@ export const CleanupSuggestionTab: React.FC = () => {
            cleanupSuggestion.tempFiles.length === 0 &&
            cleanupSuggestion.downloadFiles.length === 0 &&
            cleanupSuggestion.logFiles.length === 0 && (
-            <Empty description="系统很干净，没有发现需要清理的文件" />
+            <Empty description={t('analysis.cleanup.emptyClean')} />
           )}
         </div>
       ) : (
@@ -298,9 +308,9 @@ export const CleanupSuggestionTab: React.FC = () => {
           image={<ClearOutlined style={{ fontSize: 64, color: colors.border }} />}
           description={
             <Space direction="vertical">
-              <Text type="secondary">点击"扫描系统"开始检测可清理文件</Text>
+              <Text type="secondary">{t('analysis.cleanup.emptyStartTitle')}</Text>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                检测缓存、临时文件、下载残留、日志等
+                {t('analysis.cleanup.emptyStartHint')}
               </Text>
             </Space>
           }

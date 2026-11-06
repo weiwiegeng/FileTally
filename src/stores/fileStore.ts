@@ -2,60 +2,44 @@ import { create } from 'zustand';
 import { FileNode, FilePreviewInfo, ViewMode, SortField, SortOrder } from '../types';
 import { fileService } from '../services';
 import { invoke } from '@tauri-apps/api/core';
+import { useSettingsStore } from './settingsStore';
+import i18n from '../i18n';
+import { mapBackendError } from '../utils/backendError';
 
-// Helper function to recursively load all children (with depth limit)
-const loadAllChildren = async (
+/** 按设置的默认展开层级预加载并展开目录 */
+const expandToLevel = async (
   nodes: FileNode[],
   expandedIds: Set<string>,
-  currentDepth: number = 0,
-  maxDepth: number = 10
+  currentDepth: number,
+  maxDepth: number
 ): Promise<FileNode[]> => {
+  if (maxDepth <= 0) return nodes;
+
   const result: FileNode[] = [];
-  
   for (const node of nodes) {
-    if (node.is_dir) {
+    if (node.is_dir && currentDepth < maxDepth) {
       expandedIds.add(node.id);
-      
-      if (currentDepth < maxDepth) {
-        try {
-          const children = await fileService.scanDirectory(node.path);
-          const loadedChildren = await loadAllChildren(
-            children,
-            expandedIds,
-            currentDepth + 1,
-            maxDepth
-          );
-          result.push({
-            ...node,
-            children: loadedChildren,
-            is_loaded: true,
-          });
-        } catch (error) {
-          console.error('Failed to load children for:', node.path);
-          result.push({ ...node, children: [], is_loaded: true });
-        }
-      } else {
-        // Beyond max depth, mark as not loaded (lazy load later)
-        result.push({ ...node, is_loaded: false });
+      try {
+        const children = await fileService.scanDirectory(node.path);
+        const loadedChildren = await expandToLevel(
+          children.map((child) => ({ ...child, is_loaded: child.is_dir ? false : true })),
+          expandedIds,
+          currentDepth + 1,
+          maxDepth
+        );
+        result.push({
+          ...node,
+          children: loadedChildren,
+          is_loaded: true,
+        });
+      } catch {
+        result.push({ ...node, children: [], is_loaded: true });
       }
     } else {
       result.push(node);
     }
   }
-  
   return result;
-};
-
-// Helper to collect all directory IDs
-const collectDirIds = (nodes: FileNode[], ids: Set<string>) => {
-  for (const node of nodes) {
-    if (node.is_dir) {
-      ids.add(node.id);
-      if (node.children) {
-        collectDirIds(node.children, ids);
-      }
-    }
-  }
 };
 
 interface FileState {
@@ -86,6 +70,7 @@ interface FileState {
   removePath: (path: string) => void;
   clearPaths: () => void;
   pickDirectory: () => Promise<void>;
+  openHomeDirectory: () => Promise<void>;
   loadChildren: (path: string, nodeId: string) => Promise<void>;
   selectFile: (file: FileNode | null) => Promise<void>;
   toggleExpand: (nodeId: string) => void;
@@ -135,30 +120,42 @@ export const useFileStore = create<FileState>((set, get) => ({
     set({ loading: true, error: null, currentPaths: paths, loadingPaths: new Set(paths), selectedFile: null, previewInfo: null });
     
     try {
-      // Parallel load all paths - only first level, collapsed by default
+      const expandLevel = Math.max(0, useSettingsStore.getState().settings.defaultExpandLevel - 1);
+      const expandedIds = new Set<string>();
+
+      // Parallel load all paths，并按默认展开层级预加载
       const results = await Promise.all(
         paths.map(async (path) => {
           try {
             const nodes = await fileService.scanDirectory(path);
-            // Mark all nodes as loaded but don't expand
-            const loadedNodes = nodes.map(node => ({ ...node, is_loaded: node.is_dir ? false : true }));
-            return { path, nodes: loadedNodes, success: true };
+            const baseNodes = nodes.map(node => ({ ...node, is_loaded: node.is_dir ? false : true }));
+            const loadedNodes = await expandToLevel(baseNodes, expandedIds, 0, expandLevel);
+            return { path, nodes: loadedNodes, success: true as const, error: null as string | null };
           } catch (error) {
             console.error('Failed to load path:', path, error);
-            return { path, nodes: [], success: false };
+            return { path, nodes: [], success: false as const, error: mapBackendError(error) };
           }
         })
       );
 
-      // Build nodesMap - no expanded IDs (collapsed by default)
       const nodesMap: Record<string, FileNode[]> = {};
       results.forEach(({ path, nodes }) => {
         nodesMap[path] = nodes;
       });
 
-      set({ nodesMap, loading: false, expandedIds: new Set(), loadingPaths: new Set() });
+      const failures = results.filter((r) => !r.success);
+      const partialError =
+        failures.length === 0
+          ? null
+          : failures.length === paths.length
+            ? failures.map((f) => f.error).filter(Boolean).join('; ')
+            : i18n.t('errors.paths_load_partial', {
+                detail: failures.map((f) => `${f.path}: ${f.error}`).join('; '),
+              });
+
+      set({ nodesMap, loading: false, error: partialError, expandedIds, loadingPaths: new Set() });
     } catch (error) {
-      set({ error: String(error), loading: false, loadingPaths: new Set() });
+      set({ error: mapBackendError(error), loading: false, loadingPaths: new Set() });
     }
   },
 
@@ -188,7 +185,14 @@ export const useFileStore = create<FileState>((set, get) => ({
       set(state => {
         const newLoadingPaths = new Set(state.loadingPaths);
         newLoadingPaths.delete(path);
-        return { error: String(error), loadingPaths: newLoadingPaths };
+        const newNodesMap = { ...state.nodesMap };
+        delete newNodesMap[path];
+        return {
+          currentPaths: state.currentPaths.filter((p) => p !== path),
+          nodesMap: newNodesMap,
+          error: mapBackendError(error),
+          loadingPaths: newLoadingPaths,
+        };
       });
     }
   },
@@ -222,7 +226,18 @@ export const useFileStore = create<FileState>((set, get) => ({
         await get().setCurrentPaths(selected);
       }
     } catch (error) {
-      set({ error: String(error) });
+      set({ error: mapBackendError(error) });
+    }
+  },
+
+  openHomeDirectory: async () => {
+    try {
+      const home = await fileService.getHomeDir();
+      if (home) {
+        await get().addPath(home);
+      }
+    } catch (error) {
+      set({ error: mapBackendError(error) });
     }
   },
 
@@ -258,6 +273,7 @@ export const useFileStore = create<FileState>((set, get) => ({
   },
 
   selectFile: async (file: FileNode | null) => {
+    const requestPath = file?.path ?? null;
     set({ selectedFile: file, previewInfo: null });
     
     if (!file) return;
@@ -268,11 +284,13 @@ export const useFileStore = create<FileState>((set, get) => ({
         set({ previewLoading: true });
         try {
           const children = await fileService.scanDirectory(file.path);
-          // 更新 selectedFile 的 children
+          // 忽略过期请求
+          if (get().selectedFile?.path !== requestPath) return;
           const updatedFile = { ...file, children, is_loaded: true };
           set({ selectedFile: updatedFile, previewLoading: false });
         } catch (error) {
-          set({ previewLoading: false });
+          if (get().selectedFile?.path !== requestPath) return;
+          set({ previewLoading: false, error: mapBackendError(error) });
           console.error('Failed to load folder contents:', error);
         }
       }
@@ -281,9 +299,11 @@ export const useFileStore = create<FileState>((set, get) => ({
       set({ previewLoading: true });
       try {
         const previewInfo = await fileService.getFilePreview(file.path);
+        if (get().selectedFile?.path !== requestPath) return;
         set({ previewInfo, previewLoading: false });
       } catch (error) {
-        set({ previewLoading: false });
+        if (get().selectedFile?.path !== requestPath) return;
+        set({ previewLoading: false, error: mapBackendError(error) });
         console.error('Failed to get preview:', error);
       }
     }
@@ -319,18 +339,20 @@ export const useFileStore = create<FileState>((set, get) => ({
         // 获取当前状态
         const { selectedFile, nodesMap } = get();
         
-        // 递归更新节点路径的辅助函数
+        // Bound prefix: `/a/test` must not rewrite sibling `/a/test2`
+        const pathUnder = (path: string, prefix: string) =>
+          path === prefix || path.startsWith(prefix + '/') || path.startsWith(prefix + '\\');
+
         const updateNodePath = (node: FileNode, oldPrefix: string, newPrefix: string): FileNode => {
           const updatedNode = { ...node };
-          if (node.path.startsWith(oldPrefix)) {
-            updatedNode.path = node.path.replace(oldPrefix, newPrefix);
-          }
           if (node.path === oldPath) {
             updatedNode.name = newName;
             updatedNode.path = result.newPath;
+          } else if (pathUnder(node.path, oldPrefix)) {
+            updatedNode.path = newPrefix + node.path.slice(oldPrefix.length);
           }
           if (node.children) {
-            updatedNode.children = node.children.map(child => 
+            updatedNode.children = node.children.map(child =>
               updateNodePath(child, oldPrefix, newPrefix)
             );
           }
@@ -353,21 +375,21 @@ export const useFileStore = create<FileState>((set, get) => ({
             name: newName,
             path: result.newPath,
           };
-        } else if (selectedFile && selectedFile.path.startsWith(oldPath + '/')) {
-          // 如果选中的是重命名文件夹的子文件
+        } else if (selectedFile && pathUnder(selectedFile.path, oldPath)) {
+          // 选中的是重命名文件夹的子文件 — 与 nodesMap 相同的边界前缀拼接
           updatedSelectedFile = {
             ...selectedFile,
-            path: selectedFile.path.replace(oldPath, result.newPath),
+            path: result.newPath + selectedFile.path.slice(oldPath.length),
           };
         }
 
         set({ nodesMap: updatedNodesMap, selectedFile: updatedSelectedFile });
         return { success: true };
       } else {
-        return { success: false, error: result.error || '重命名失败' };
+        return { success: false, error: result.error || i18n.t('browser.fileTreeNode.renameFailed') };
       }
     } catch (error) {
-      return { success: false, error: String(error) };
+      return { success: false, error: mapBackendError(error) };
     }
   },
 }));

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Typography, Space } from 'antd';
 import { SearchOutlined } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import { SearchPanel } from './SearchPanel';
 import { SearchResults } from './SearchResults';
 import { useThemeColors } from '../../hooks';
@@ -8,8 +9,9 @@ import { useThemeColors } from '../../hooks';
 const { Title } = Typography;
 
 export const FileSearch: React.FC = () => {
+  const { t } = useTranslation();
   const colors = useThemeColors();
-  
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       {/* Header */}
@@ -25,7 +27,7 @@ export const FileSearch: React.FC = () => {
         <Space>
           <SearchOutlined style={{ fontSize: 24, color: colors.accentBlue }} />
           <Title level={4} style={{ margin: 0, color: colors.textPrimary }}>
-            智能搜索
+            {t('search.fileSearch.title')}
           </Title>
         </Space>
       </div>

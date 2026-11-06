@@ -1,12 +1,13 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { RightOutlined, DownOutlined, LoadingOutlined, EditOutlined } from '@ant-design/icons';
 import { Dropdown, Input, message } from 'antd';
+import { useTranslation } from 'react-i18next';
 import type { MenuProps } from 'antd';
 import { FileNode } from '../../types';
 import { FileIcon } from './FileIcon';
 import { useFileStore } from '../../stores';
 import { useThemeColors } from '../../hooks';
-import { formatSize, formatDate } from '../../utils';
+import { formatSize, formatDate, sortFileNodes, mapBackendError } from '../../utils';
 
 interface FileTreeNodeProps {
   node: FileNode;
@@ -19,6 +20,7 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
   level,
   showHidden,
 }) => {
+  const { t } = useTranslation();
   const {
     expandedIds,
     toggleExpand,
@@ -26,6 +28,8 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
     selectFile,
     selectedFile,
     renameFile,
+    sortField,
+    sortOrder,
   } = useFileStore();
   const colors = useThemeColors();
 
@@ -83,10 +87,10 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
     setRenaming(false);
 
     if (result.success) {
-      message.success('重命名成功');
+      message.success(t('browser.fileTreeNode.renameSuccess'));
       setIsEditing(false);
     } else {
-      message.error(result.error || '重命名失败');
+      message.error(result.error ? mapBackendError(result.error) : t('browser.fileTreeNode.renameFailed'));
     }
   };
 
@@ -104,7 +108,7 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
   const contextMenuItems: MenuProps['items'] = [
     {
       key: 'rename',
-      label: '重命名',
+      label: t('browser.fileTreeNode.contextRename'),
       icon: <EditOutlined />,
       onClick: (e) => {
         e.domEvent.stopPropagation();
@@ -136,9 +140,10 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
   };
 
   const children = node.children || [];
-  const filteredChildren = showHidden
+  const visibleChildren = showHidden
     ? children
     : children.filter((child) => !child.is_hidden);
+  const filteredChildren = sortFileNodes(visibleChildren, sortField, sortOrder);
 
   return (
     <div>
@@ -253,7 +258,7 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
             >
               {node.is_dir
                 ? node.children_count !== null
-                  ? `${node.children_count} 项`
+                  ? t('browser.fileTreeNode.childrenCount', { count: node.children_count })
                   : ''
                 : formatSize(node.size)}
             </span>

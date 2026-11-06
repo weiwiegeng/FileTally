@@ -21,15 +21,29 @@ import { FileTransfer } from '../transfer';
 import { ExcelCheck } from '../excel';
 import { useSettingsStore } from '../../stores';
 
-const { Sider, Content, Header } = Layout;
+const { Sider, Content } = Layout;
 const { Title } = Typography;
 
 type MenuKey = 'disk' | 'browser' | 'remote' | 'filter' | 'transfer' | 'excel' | 'ai' | 'settings';
 
+const getSystemPrefersDark = () =>
+  typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+
 export const MainLayout: React.FC = () => {
   const { settings } = useSettingsStore();
   const { t, i18n } = useTranslation();
-  const [activeMenu, setActiveMenu] = useState<MenuKey>(settings.defaultPage as MenuKey);
+  const [systemDark, setSystemDark] = useState(getSystemPrefersDark);
+
+  const resolveDefaultPage = (page: string): MenuKey => {
+    if (page === 'search') return 'filter';
+    const allowed: MenuKey[] = ['disk', 'browser', 'remote', 'filter', 'transfer', 'excel', 'ai', 'settings'];
+    return (allowed as string[]).includes(page) ? (page as MenuKey) : 'disk';
+  };
+
+  // defaultPage 只影响启动时的初始页，改设置时不强制跳转当前页
+  const [activeMenu, setActiveMenu] = useState<MenuKey>(() =>
+    resolveDefaultPage(settings.defaultPage)
+  );
 
   // 监听语言设置变化，实时切换
   useEffect(() => {
@@ -38,13 +52,23 @@ export const MainLayout: React.FC = () => {
     }
   }, [settings.language, i18n]);
 
-  // 根据设置切换主题算法
-  const themeAlgorithm = useMemo(() => {
-    if (settings.theme === 'light') {
-      return theme.defaultAlgorithm;
-    }
-    return theme.darkAlgorithm;
+  // system 主题跟随 OS
+  useEffect(() => {
+    if (settings.theme !== 'system' || typeof window === 'undefined') return;
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => setSystemDark(media.matches);
+    onChange();
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
   }, [settings.theme]);
+
+  const isDark =
+    settings.theme === 'dark' || (settings.theme === 'system' && systemDark);
+
+  const themeAlgorithm = useMemo(
+    () => (isDark ? theme.darkAlgorithm : theme.defaultAlgorithm),
+    [isDark]
+  );
 
   const menuItems = [
     {
@@ -115,9 +139,9 @@ export const MainLayout: React.FC = () => {
     }
   };
 
-  // 根据主题设置背景色
+  // 根据主题设置背景色（含 system）
   const bgColors = useMemo(() => {
-    if (settings.theme === 'light') {
+    if (!isDark) {
       return {
         primary: '#ffffff',
         secondary: '#f5f5f5',
@@ -135,12 +159,12 @@ export const MainLayout: React.FC = () => {
       text: '#ffffff',
       textSecondary: '#8c8c8c',
     };
-  }, [settings.theme]);
+  }, [isDark]);
 
   // 同步主题到 document 属性（用于 CSS 滚动条等全局样式）
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', settings.theme);
-  }, [settings.theme]);
+    document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
+  }, [isDark]);
 
   return (
     <ConfigProvider
@@ -148,8 +172,8 @@ export const MainLayout: React.FC = () => {
         algorithm: themeAlgorithm,
         token: {
           colorPrimary: '#1890ff',
-          colorBgContainer: settings.theme === 'light' ? '#ffffff' : '#1a1a2e',
-          colorBgElevated: settings.theme === 'light' ? '#f5f5f5' : '#16213e',
+          colorBgContainer: isDark ? '#1a1a2e' : '#ffffff',
+          colorBgElevated: isDark ? '#16213e' : '#f5f5f5',
           colorBorder: bgColors.border,
           colorText: bgColors.text,
           colorTextSecondary: bgColors.textSecondary,
@@ -190,10 +214,10 @@ export const MainLayout: React.FC = () => {
             </div>
             <div>
               <Title level={5} style={{ margin: 0, color: bgColors.text }}>
-                FileTally
+                {t('app.name')}
               </Title>
               <div style={{ fontSize: 10, color: bgColors.textSecondary }}>
-                Smart File Manager
+                {t('app.tagline')}
               </div>
             </div>
           </div>

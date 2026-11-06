@@ -2,7 +2,9 @@ import React, { useEffect, useState, useRef } from 'react';
 import { Table, Spin, Alert, Tabs } from 'antd';
 import * as XLSX from 'xlsx';
 import { readFile } from '@tauri-apps/plugin-fs';
+import { useTranslation } from 'react-i18next';
 import { useThemeColors } from '../../hooks';
+import { mapBackendError } from '../../utils/backendError';
 
 interface ExcelPreviewProps {
   filePath: string;
@@ -15,6 +17,7 @@ interface SheetData {
 }
 
 export const ExcelPreview: React.FC<ExcelPreviewProps> = ({ filePath }) => {
+  const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sheets, setSheets] = useState<SheetData[]>([]);
@@ -51,7 +54,9 @@ export const ExcelPreview: React.FC<ExcelPreviewProps> = ({ filePath }) => {
           }
 
           // First row as headers
-          const headers = (jsonData[0] || []).map((h, i) => String(h || `列${i + 1}`));
+          const headers = (jsonData[0] || []).map((h, i) =>
+            String(h || t('preview.excel.defaultColumn', { index: i + 1 }))
+          );
           
           // Rest as data rows
           const rows = jsonData.slice(1).map((row, rowIndex) => {
@@ -71,7 +76,7 @@ export const ExcelPreview: React.FC<ExcelPreviewProps> = ({ filePath }) => {
       } catch (err) {
         if (abortRef.current) return;
         console.error('Failed to load Excel:', err);
-        setError('无法加载 Excel 文件');
+        setError(t('preview.excel.loadFailed', { error: mapBackendError(err) }));
       } finally {
         if (!abortRef.current) {
           setLoading(false);
@@ -84,12 +89,12 @@ export const ExcelPreview: React.FC<ExcelPreviewProps> = ({ filePath }) => {
     return () => {
       abortRef.current = true;
     };
-  }, [filePath]);
+  }, [filePath, t]);
 
   if (loading) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
-        <Spin tip="加载 Excel 中..." />
+        <Spin tip={t('preview.excel.loading')} />
       </div>
     );
   }
@@ -97,7 +102,7 @@ export const ExcelPreview: React.FC<ExcelPreviewProps> = ({ filePath }) => {
   if (error) {
     return (
       <Alert
-        message="Excel 预览失败"
+        message={t('preview.excel.errorTitle')}
         description={error}
         type="error"
         showIcon
@@ -106,7 +111,7 @@ export const ExcelPreview: React.FC<ExcelPreviewProps> = ({ filePath }) => {
   }
 
   if (sheets.length === 0) {
-    return <Alert message="Excel 文件为空" type="info" showIcon />;
+    return <Alert message={t('preview.excel.empty')} type="info" showIcon />;
   }
 
   const tabItems = sheets.map((sheet) => ({
@@ -131,7 +136,7 @@ export const ExcelPreview: React.FC<ExcelPreviewProps> = ({ filePath }) => {
           pageSizeOptions: ['50', '100', '200'],
           showQuickJumper: true,
           size: 'small',
-          showTotal: (total) => `共 ${total} 行`,
+          showTotal: (total) => t('preview.excel.paginationTotal', { total }),
         }}
         style={{ 
           background: colors.bgSecondary,

@@ -30,7 +30,9 @@ export interface OldFile {
   name: string;
   size: number;
   sizeFormatted: string;
-  lastAccessedDays: number;
+  lastModifiedDays: number;
+  /** @deprecated kept for older cached payloads */
+  lastAccessedDays?: number;
   modifiedTime: number;
 }
 
@@ -46,6 +48,7 @@ export interface FolderAnalysisResult {
   duplicateGroups: DuplicateGroup[];
   oldFiles: OldFile[];
   analyzedAt: number;
+  truncated?: boolean;
 }
 
 // 清理项

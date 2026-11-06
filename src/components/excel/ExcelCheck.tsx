@@ -40,6 +40,8 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { useTranslation } from 'react-i18next';
+import i18n from '../../i18n';
+import { mapBackendError } from '../../utils/backendError';
 import { RemoteFolderSelector } from '../search/RemoteFolderSelector';
 import { useCheckConfigStore } from '../../stores';
 
@@ -73,6 +75,7 @@ interface ExcelMatchResult {
   missingCount: number;
   items: MatchResultItem[];
   outputPath: string | null;
+  truncated?: boolean;
 }
 
 interface IntegrityCheckItem {
@@ -96,6 +99,7 @@ interface BatchIntegrityResult {
   incompleteCount: number;
   results: FolderIntegrityResult[];
   outputPath: string | null;
+  truncated?: boolean;
 }
 
 // 基于 Excel 的完整性检查结果
@@ -121,6 +125,7 @@ interface ExcelIntegrityResult {
   notFoundCount: number;
   items: ExcelIntegrityItem[];
   outputPath: string | null;
+  truncated?: boolean;
 }
 
 // 文件树节点
@@ -135,6 +140,7 @@ interface FolderTreeResult {
   root: FileTreeNode;
   totalFiles: number;
   totalFolders: number;
+  truncated?: boolean;
 }
 
 // 转换为 Ant Design Tree 数据格式
@@ -164,7 +170,9 @@ export const ExcelCheck: React.FC = () => {
   // 完整性检查状态
   const [integrityFolder, setIntegrityFolder] = useState<string>('');
   const [integrityIsRemote, setIntegrityIsRemote] = useState(false);
-  const [templates, setTemplates] = useState<string[]>(['{name}.docx', '{name}照片']);
+  const [templates, setTemplates] = useState<string[]>(() =>
+    i18n.t('excel.defaults.sampleTemplates').split('\n').filter(Boolean)
+  );
   const [namePattern, setNamePattern] = useState<string>('auto');
   const [integrityResult, setIntegrityResult] = useState<BatchIntegrityResult | null>(null);
   const [checking, setChecking] = useState(false);
@@ -207,14 +215,14 @@ export const ExcelCheck: React.FC = () => {
       if (config.targetFolder) {
         scanFolderTree(config.targetFolder, 'integrity');
       }
-      message.success(`已加载配置: ${config.name}`);
+      message.success(t('excel.config.loaded', { name: config.name }));
     }
   };
 
   // 保存配置
   const handleSaveConfig = () => {
     if (!configName.trim()) {
-      message.warning('请输入配置名称');
+      message.warning(t('excel.config.nameRequired'));
       return;
     }
 
@@ -226,7 +234,7 @@ export const ExcelCheck: React.FC = () => {
         templates,
         namePattern,
       });
-      message.success('配置已更新');
+      message.success(t('excel.config.updated'));
     } else {
       // 新建配置
       const id = addConfig({
@@ -236,7 +244,7 @@ export const ExcelCheck: React.FC = () => {
         namePattern,
       });
       selectConfig(id);
-      message.success('配置已保存');
+      message.success(t('excel.config.saved'));
     }
 
     setSaveConfigModalVisible(false);
@@ -262,7 +270,7 @@ export const ExcelCheck: React.FC = () => {
   // 删除配置
   const handleDeleteConfig = (configId: string) => {
     deleteConfig(configId);
-    message.success('配置已删除');
+    message.success(t('excel.config.deleted'));
   };
 
   // 将后端文件树转换为 Ant Design Tree 格式
@@ -282,7 +290,7 @@ export const ExcelCheck: React.FC = () => {
     try {
       const result = await invoke<FolderTreeResult>('scan_folder_tree', {
         folderPath,
-        maxDepth: null, // 不限制层数，显示所有
+        maxDepth: 16, // 与后端默认一致，上限 32
       });
 
       const treeData = result.root.children?.map(convertToTreeData) || [];
@@ -295,8 +303,13 @@ export const ExcelCheck: React.FC = () => {
         setIntegrityFolderTree(treeData);
         setIntegrityTreeInfo(info);
       }
+
+      if (result.truncated) {
+        message.warning(t('excel.messages.truncatedWarning'));
+      }
     } catch (error) {
-      console.error('扫描文件夹失败:', error);
+      console.error('scan folder tree failed:', error);
+      message.error(t('excel.messages.scanTreeFailed', { error: mapBackendError(error) }));
     } finally {
       setScanningTree(false);
     }
@@ -307,7 +320,7 @@ export const ExcelCheck: React.FC = () => {
     try {
       const selected = await open({
         multiple: false,
-        filters: [{ name: 'Excel', extensions: ['xlsx', 'xls'] }],
+        filters: [{ name: t('excel.filterExcel'), extensions: ['xlsx', 'xls'] }],
       });
 
       if (selected) {
@@ -326,7 +339,7 @@ export const ExcelCheck: React.FC = () => {
         setSelectedColumn(null);
       }
     } catch (error) {
-      message.error(`打开文件失败: ${error}`);
+      message.error(t('excel.messages.openFileFailed', { error: mapBackendError(error) }));
     }
   };
 
@@ -344,7 +357,7 @@ export const ExcelCheck: React.FC = () => {
       setSelectedSheet(sheetIndex);
       setSelectedColumn(null);
     } catch (error) {
-      message.error(`读取工作表失败: ${error}`);
+      message.error(t('excel.messages.readSheetFailed', { error: mapBackendError(error) }));
     }
   };
 
@@ -373,7 +386,7 @@ export const ExcelCheck: React.FC = () => {
         scanFolderTree(folderPath, target);
       }
     } catch (error) {
-      message.error(`选择文件夹失败: ${error}`);
+      message.error(t('excel.messages.selectFolderFailed', { error: mapBackendError(error) }));
     }
   };
 
@@ -398,17 +411,20 @@ export const ExcelCheck: React.FC = () => {
   // 执行 Excel 比对
   const handleMatch = async () => {
     if (!excelPath || selectedColumn === null || !targetFolder) {
-      message.warning('请先选择 Excel 文件、匹配列和目标文件夹');
+      message.warning(t('excel.messages.matchPrerequisite'));
       return;
     }
 
     setMatching(true);
     try {
-      // 先获取保存路径
+      // 先获取保存路径（取消则不导出，仍执行比对）
       const outputPath = await save({
-        defaultPath: excelPath.replace(/\.xlsx?$/i, '_标注结果.xlsx'),
-        filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+        defaultPath: excelPath.replace(/\.xlsx?$/i, t('excel.defaults.matchOutputSuffix')),
+        filters: [{ name: t('excel.filterExcel'), extensions: ['xlsx'] }],
       });
+      if (outputPath === null) {
+        // 用户取消保存对话框：仅比对、不写文件
+      }
 
       const result = await invoke<ExcelMatchResult>('match_excel_with_folder', {
         excelPath,
@@ -417,18 +433,21 @@ export const ExcelCheck: React.FC = () => {
         folderPath: targetFolder,
         matchMode,
         markColor,
-        outputPath,
+        outputPath: outputPath || null,
       });
 
       setMatchResult(result);
 
+      if (result.truncated) {
+        message.warning(t('excel.messages.truncatedWarning'));
+      }
       if (result.outputPath) {
-        message.success(`比对完成，结果已保存到: ${result.outputPath}`);
+        message.success(t('excel.messages.matchDoneSaved', { path: result.outputPath }));
       } else {
-        message.success('比对完成');
+        message.success(t('excel.messages.matchDone'));
       }
     } catch (error) {
-      message.error(`比对失败: ${error}`);
+      message.error(t('excel.messages.matchFailed', { error: mapBackendError(error) }));
     } finally {
       setMatching(false);
     }
@@ -437,34 +456,37 @@ export const ExcelCheck: React.FC = () => {
   // 执行完整性检查
   const handleIntegrityCheck = async () => {
     if (!integrityFolder || templates.length === 0) {
-      message.warning('请先选择目标文件夹和添加检查模板');
+      message.warning(t('excel.messages.integrityPrerequisiteTemplates'));
       return;
     }
 
     setChecking(true);
     try {
-      // 获取保存路径
+      // 获取保存路径；取消则仅检查不导出
       const outputPath = await save({
-        defaultPath: '完整性检查报告.xlsx',
-        filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+        defaultPath: t('excel.defaults.integrityReportFileName'),
+        filters: [{ name: t('excel.filterExcel'), extensions: ['xlsx'] }],
       });
 
       const result = await invoke<BatchIntegrityResult>('check_folder_integrity', {
         targetFolder: integrityFolder,
         templates,
         namePattern,
-        outputPath,
+        outputPath: outputPath || null,
       });
 
       setIntegrityResult(result);
 
+      if (result.truncated) {
+        message.warning(t('excel.messages.truncatedWarning'));
+      }
       if (result.outputPath) {
-        message.success(`检查完成，报告已保存到: ${result.outputPath}`);
+        message.success(t('excel.messages.checkDoneSavedReport', { path: result.outputPath }));
       } else {
-        message.success('检查完成');
+        message.success(t('excel.messages.checkDone'));
       }
     } catch (error) {
-      message.error(`检查失败: ${error}`);
+      message.error(t('excel.messages.checkFailed', { error: mapBackendError(error) }));
     } finally {
       setChecking(false);
     }
@@ -475,7 +497,7 @@ export const ExcelCheck: React.FC = () => {
     try {
       const selected = await open({
         multiple: false,
-        filters: [{ name: 'Excel', extensions: ['xlsx', 'xls'] }],
+        filters: [{ name: t('excel.filterExcel'), extensions: ['xlsx', 'xls'] }],
       });
 
       if (selected) {
@@ -494,7 +516,7 @@ export const ExcelCheck: React.FC = () => {
         setIntegrityNameColumn(null);
       }
     } catch (error) {
-      message.error(`打开文件失败: ${error}`);
+      message.error(t('excel.messages.openFileFailed', { error: mapBackendError(error) }));
     }
   };
 
@@ -512,23 +534,23 @@ export const ExcelCheck: React.FC = () => {
       setIntegritySheet(sheetIndex);
       setIntegrityNameColumn(null);
     } catch (error) {
-      message.error(`读取工作表失败: ${error}`);
+      message.error(t('excel.messages.readSheetFailed', { error: mapBackendError(error) }));
     }
   };
 
   // 执行基于 Excel 的完整性检查
   const handleExcelIntegrityCheck = async () => {
     if (!integrityExcelPath || integrityNameColumn === null || !integrityFolder || templates.length === 0) {
-      message.warning('请先选择 Excel 文件、姓名列、目标文件夹和检查模板');
+      message.warning(t('excel.messages.integrityPrerequisiteExcel'));
       return;
     }
 
     setChecking(true);
     try {
-      // 获取保存路径（默认保存到原文件同目录）
+      // 获取保存路径；取消则仅检查不导出
       const outputPath = await save({
-        defaultPath: integrityExcelPath.replace(/\.xlsx?$/i, '_检查结果.xlsx'),
-        filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+        defaultPath: integrityExcelPath.replace(/\.xlsx?$/i, t('excel.defaults.integrityOutputSuffix')),
+        filters: [{ name: t('excel.filterExcel'), extensions: ['xlsx'] }],
       });
 
       const result = await invoke<ExcelIntegrityResult>('check_integrity_with_excel', {
@@ -538,18 +560,21 @@ export const ExcelCheck: React.FC = () => {
         targetFolder: integrityFolder,
         templates,
         folderMatchMode: integrityFolderMatchMode,
-        outputPath,
+        outputPath: outputPath || null,
       });
 
       setExcelIntegrityResult(result);
 
+      if (result.truncated) {
+        message.warning(t('excel.messages.truncatedWarning'));
+      }
       if (result.outputPath) {
-        message.success(`检查完成，结果已标注到: ${result.outputPath}`);
+        message.success(t('excel.messages.checkDoneAnnotated', { path: result.outputPath }));
       } else {
-        message.success('检查完成');
+        message.success(t('excel.messages.checkDone'));
       }
     } catch (error) {
-      message.error(`检查失败: ${error}`);
+      message.error(t('excel.messages.checkFailed', { error: mapBackendError(error) }));
     } finally {
       setChecking(false);
     }
@@ -558,35 +583,35 @@ export const ExcelCheck: React.FC = () => {
   // 匹配结果表格列
   const matchColumns = [
     {
-      title: '行号',
+      title: t('excel.match.colRowIndex'),
       dataIndex: 'rowIndex',
       key: 'rowIndex',
       width: 80,
     },
     {
-      title: '值',
+      title: t('excel.match.colValue'),
       dataIndex: 'value',
       key: 'value',
       ellipsis: true,
     },
     {
-      title: '状态',
+      title: t('excel.match.colStatus'),
       dataIndex: 'matched',
       key: 'matched',
       width: 100,
       render: (matched: boolean) =>
         matched ? (
           <Tag color="success" icon={<CheckCircleOutlined />}>
-            已匹配
+            {t('excel.match.statusMatched')}
           </Tag>
         ) : (
           <Tag color="error" icon={<CloseCircleOutlined />}>
-            缺失
+            {t('excel.match.statusMissing')}
           </Tag>
         ),
     },
     {
-      title: '匹配文件',
+      title: t('excel.match.colMatchedFiles'),
       dataIndex: 'matchedFile',
       key: 'matchedFile',
       ellipsis: true,
@@ -597,13 +622,13 @@ export const ExcelCheck: React.FC = () => {
   // 完整性检查结果表格列
   const integrityColumns = [
     {
-      title: '文件夹',
+      title: t('excel.integrity.colFolder'),
       dataIndex: 'folderName',
       key: 'folderName',
       ellipsis: true,
     },
     {
-      title: '提取姓名',
+      title: t('excel.integrity.colExtractedName'),
       dataIndex: 'extractedName',
       key: 'extractedName',
       width: 120,
@@ -622,15 +647,15 @@ export const ExcelCheck: React.FC = () => {
       },
     })),
     {
-      title: '状态',
+      title: t('excel.integrity.colStatus'),
       dataIndex: 'isComplete',
       key: 'isComplete',
       width: 80,
       render: (isComplete: boolean) =>
         isComplete ? (
-          <Tag color="success">完整</Tag>
+          <Tag color="success">{t('excel.integrity.statusComplete')}</Tag>
         ) : (
-          <Tag color="error">缺失</Tag>
+          <Tag color="error">{t('excel.integrity.statusMissing')}</Tag>
         ),
     },
   ];
@@ -639,11 +664,11 @@ export const ExcelCheck: React.FC = () => {
   const renderMatchTab = () => (
     <Space direction="vertical" style={{ width: '100%' }} size="large">
       {/* Excel 文件选择 */}
-      <Card size="small" title="1. 选择 Excel 文件">
+      <Card size="small" title={t('excel.match.step1Title')}>
         <Space direction="vertical" style={{ width: '100%' }}>
           <Space>
             <Button icon={<FileExcelOutlined />} onClick={handleSelectExcel}>
-              选择 Excel 文件
+              {t('excel.match.selectExcel')}
             </Button>
             {excelPath && <Text type="secondary">{excelPath}</Text>}
           </Space>
@@ -651,7 +676,7 @@ export const ExcelCheck: React.FC = () => {
           {excelInfo && (
             <>
               <Space>
-                <Text>工作表:</Text>
+                <Text>{t('excel.match.sheetLabel')}</Text>
                 <Select
                   value={selectedSheet}
                   onChange={handleSheetChange}
@@ -663,22 +688,22 @@ export const ExcelCheck: React.FC = () => {
                     </Select.Option>
                   ))}
                 </Select>
-                <Text type="secondary">共 {excelInfo.rowCount} 行数据</Text>
+                <Text type="secondary">{t('excel.match.rowCount', { count: excelInfo.rowCount })}</Text>
               </Space>
 
               <Space>
-                <Text>匹配列:</Text>
+                <Text>{t('excel.match.matchColumnLabel')}</Text>
                 <Select
                   value={selectedColumn}
                   onChange={setSelectedColumn}
                   style={{ width: 300 }}
-                  placeholder="选择要匹配的列"
+                  placeholder={t('excel.match.matchColumnPlaceholder')}
                 >
                   {excelInfo.columns.map((col) => (
                     <Select.Option key={col.index} value={col.index}>
-                      {col.letter}列 - {col.name}
+                      {t('excel.match.columnOption', { letter: col.letter, name: col.name })}
                       {col.sampleValues.length > 0 && (
-                        <Text type="secondary"> (如: {col.sampleValues[0]})</Text>
+                        <Text type="secondary">{t('excel.match.columnSample', { sample: col.sampleValues[0] })}</Text>
                       )}
                     </Select.Option>
                   ))}
@@ -690,18 +715,18 @@ export const ExcelCheck: React.FC = () => {
       </Card>
 
       {/* 目标文件夹选择 */}
-      <Card size="small" title="2. 选择目标文件夹（递归搜索所有子文件夹）">
+      <Card size="small" title={t('excel.match.step2Title')}>
         <Space direction="vertical" style={{ width: '100%' }}>
           <Space>
             <Button icon={<FolderOpenOutlined />} onClick={() => handleSelectFolder('match')}>
-              本地文件夹
+              {t('excel.match.localFolder')}
             </Button>
             <Button icon={<CloudOutlined />} onClick={() => handleSelectRemote('match')}>
-              远程文件夹
+              {t('excel.match.remoteFolder')}
             </Button>
             {targetFolder && (
               <Tag color={isRemote ? 'blue' : 'default'}>
-                {isRemote ? '远程: ' : ''}{targetFolder}
+                {isRemote ? t('excel.match.remotePrefix') : ''}{targetFolder}
               </Tag>
             )}
           </Space>
@@ -710,12 +735,12 @@ export const ExcelCheck: React.FC = () => {
           {targetFolder && !isRemote && (
             <div style={{ marginTop: 8 }}>
               {scanningTree ? (
-                <Spin tip="扫描中..." />
+                <Spin tip={t('excel.match.scanning')} />
               ) : matchFolderTree && matchFolderTree.length > 0 ? (
                 <>
                   <div style={{ marginBottom: 8 }}>
                     <Text type="secondary">
-                      共 {matchTreeInfo?.folders} 个文件夹，{matchTreeInfo?.files} 个文件
+{t('excel.match.treeSummary', { folders: matchTreeInfo?.folders ?? 0, files: matchTreeInfo?.files ?? 0 })}
                     </Text>
                   </div>
                   <Tree
@@ -738,28 +763,28 @@ export const ExcelCheck: React.FC = () => {
       </Card>
 
       {/* 匹配选项 */}
-      <Card size="small" title="3. 匹配选项">
+      <Card size="small" title={t('excel.match.step3Title')}>
         <Space size="large">
           <Space>
-            <Text>匹配方式:</Text>
+            <Text>{t('excel.match.matchModeLabel')}</Text>
             <Radio.Group value={matchMode} onChange={(e) => setMatchMode(e.target.value)}>
-              <Radio.Button value="exact">精确匹配</Radio.Button>
-              <Radio.Button value="contains">包含匹配</Radio.Button>
-              <Radio.Button value="starts_with">前缀匹配</Radio.Button>
+              <Radio.Button value="exact">{t('excel.match.matchExact')}</Radio.Button>
+              <Radio.Button value="contains">{t('excel.match.matchContains')}</Radio.Button>
+              <Radio.Button value="starts_with">{t('excel.match.matchStartsWith')}</Radio.Button>
             </Radio.Group>
           </Space>
 
           <Space>
-            <Text>标注颜色:</Text>
+            <Text>{t('excel.match.highlightColorLabel')}</Text>
             <Radio.Group value={markColor} onChange={(e) => setMarkColor(e.target.value)}>
               <Radio.Button value="red" style={{ backgroundColor: markColor === 'red' ? '#ff6b6b' : undefined }}>
-                红色
+                {t('excel.match.colorRed')}
               </Radio.Button>
               <Radio.Button value="yellow" style={{ backgroundColor: markColor === 'yellow' ? '#ffe66d' : undefined }}>
-                黄色
+                {t('excel.match.colorYellow')}
               </Radio.Button>
               <Radio.Button value="green" style={{ backgroundColor: markColor === 'green' ? '#6bcb77' : undefined }}>
-                绿色
+                {t('excel.match.colorGreen')}
               </Radio.Button>
             </Radio.Group>
           </Space>
@@ -776,19 +801,19 @@ export const ExcelCheck: React.FC = () => {
         disabled={!excelPath || selectedColumn === null || !targetFolder}
         block
       >
-        开始比对并导出
+        {t('excel.match.startMatchExport')}
       </Button>
 
       {/* 匹配结果 */}
       {matchResult && (
-        <Card size="small" title="比对结果">
+        <Card size="small" title={t('excel.match.resultTitle')}>
           <Row gutter={16} style={{ marginBottom: 16 }}>
             <Col span={8}>
-              <Statistic title="总行数" value={matchResult.totalRows} />
+              <Statistic title={t('excel.match.statTotalRows')} value={matchResult.totalRows} />
             </Col>
             <Col span={8}>
               <Statistic
-                title="已匹配"
+                title={t('excel.match.statMatched')}
                 value={matchResult.matchedCount}
                 valueStyle={{ color: '#52c41a' }}
                 prefix={<CheckCircleOutlined />}
@@ -796,7 +821,7 @@ export const ExcelCheck: React.FC = () => {
             </Col>
             <Col span={8}>
               <Statistic
-                title="缺失"
+                title={t('excel.match.statMissing')}
                 value={matchResult.missingCount}
                 valueStyle={{ color: '#ff4d4f' }}
                 prefix={<CloseCircleOutlined />}
@@ -807,7 +832,7 @@ export const ExcelCheck: React.FC = () => {
           {matchResult.outputPath && (
             <Alert
               type="success"
-              message={`标注后的 Excel 已保存到: ${matchResult.outputPath}`}
+              message={t('excel.match.savedAlert', { path: matchResult.outputPath })}
               style={{ marginBottom: 16 }}
             />
           )}
@@ -818,7 +843,7 @@ export const ExcelCheck: React.FC = () => {
             rowKey="rowIndex"
             size="small"
             pagination={{ pageSize: 10 }}
-            title={() => <Text strong>缺失项列表</Text>}
+            title={() => <Text strong>{t('excel.match.missingListTitle')}</Text>}
           />
         </Card>
       )}
@@ -829,7 +854,7 @@ export const ExcelCheck: React.FC = () => {
   const renderIntegrityTab = () => (
     <Space direction="vertical" style={{ width: '100%' }} size="large">
       {/* 名单来源选择 */}
-      <Card size="small" title="1. 选择检查名单来源">
+      <Card size="small" title={t('excel.integrity.step1Title')}>
         <Space direction="vertical" style={{ width: '100%' }}>
           <Radio.Group 
             value={integritySource} 
@@ -837,10 +862,10 @@ export const ExcelCheck: React.FC = () => {
             buttonStyle="solid"
           >
             <Radio.Button value="excel">
-              <FileExcelOutlined /> 从 Excel 导入名单
+              <FileExcelOutlined /> {t('excel.integrity.sourceExcel')}
             </Radio.Button>
             <Radio.Button value="folder">
-              <FolderOpenOutlined /> 从文件夹扫描
+              <FolderOpenOutlined /> {t('excel.integrity.sourceFolder')}
             </Radio.Button>
           </Radio.Group>
   
@@ -848,7 +873,7 @@ export const ExcelCheck: React.FC = () => {
             <>
               <Space>
                 <Button icon={<FileExcelOutlined />} onClick={handleSelectIntegrityExcel}>
-                  选择 Excel 文件
+                  {t('excel.match.selectExcel')}
                 </Button>
                 {integrityExcelPath && <Text type="secondary">{integrityExcelPath}</Text>}
               </Space>
@@ -856,7 +881,7 @@ export const ExcelCheck: React.FC = () => {
               {integrityExcelInfo && (
                 <>
                   <Space>
-                    <Text>工作表:</Text>
+                    <Text>{t('excel.match.sheetLabel')}</Text>
                     <Select
                       value={integritySheet}
                       onChange={handleIntegritySheetChange}
@@ -868,22 +893,22 @@ export const ExcelCheck: React.FC = () => {
                         </Select.Option>
                       ))}
                     </Select>
-                    <Text type="secondary">共 {integrityExcelInfo.rowCount} 行数据</Text>
+                    <Text type="secondary">{t('excel.integrity.rowCount', { count: integrityExcelInfo.rowCount })}</Text>
                   </Space>
   
                   <Space>
-                    <Text>姓名列:</Text>
+                    <Text>{t('excel.integrity.nameColumnLabel')}</Text>
                     <Select
                       value={integrityNameColumn}
                       onChange={setIntegrityNameColumn}
                       style={{ width: 300 }}
-                      placeholder="选择包含姓名的列"
+                      placeholder={t('excel.integrity.nameColumnPlaceholder')}
                     >
                       {integrityExcelInfo.columns.map((col) => (
                         <Select.Option key={col.index} value={col.index}>
-                          {col.letter}列 - {col.name}
+                          {t('excel.match.columnOption', { letter: col.letter, name: col.name })}
                           {col.sampleValues.length > 0 && (
-                            <Text type="secondary"> (如: {col.sampleValues[0]})</Text>
+                            <Text type="secondary">{t('excel.match.columnSample', { sample: col.sampleValues[0] })}</Text>
                           )}
                         </Select.Option>
                       ))}
@@ -891,11 +916,11 @@ export const ExcelCheck: React.FC = () => {
                   </Space>
   
                   <Space>
-                    <Text>文件夹匹配方式:</Text>
+                    <Text>{t('excel.integrity.folderMatchModeLabel')}</Text>
                     <Radio.Group value={integrityFolderMatchMode} onChange={(e) => setIntegrityFolderMatchMode(e.target.value)}>
-                      <Radio.Button value="contains">包含匹配</Radio.Button>
-                      <Radio.Button value="exact">精确匹配</Radio.Button>
-                      <Radio.Button value="starts_with">前缀匹配</Radio.Button>
+                      <Radio.Button value="contains">{t('excel.match.matchContains')}</Radio.Button>
+                      <Radio.Button value="exact">{t('excel.match.matchExact')}</Radio.Button>
+                      <Radio.Button value="starts_with">{t('excel.match.matchStartsWith')}</Radio.Button>
                     </Radio.Group>
                   </Space>
                 </>
@@ -904,25 +929,25 @@ export const ExcelCheck: React.FC = () => {
           ) : (
             <Alert
               type="info"
-              message="扫描模式将自动遍历目标文件夹下的所有子文件夹，并从文件夹名提取姓名进行检查"
+              message={t('excel.integrity.scanModeAlert')}
             />
           )}
         </Space>
       </Card>
   
       {/* 目标文件夹选择 */}
-      <Card size="small" title="2. 选择要检查的文件夹（检查所有子文件夹）">
+      <Card size="small" title={t('excel.integrity.step2Title')}>
         <Space direction="vertical" style={{ width: '100%' }}>
           <Space>
             <Button icon={<FolderOpenOutlined />} onClick={() => handleSelectFolder('integrity')}>
-              本地文件夹
+              {t('excel.match.localFolder')}
             </Button>
             <Button icon={<CloudOutlined />} onClick={() => handleSelectRemote('integrity')}>
-              远程文件夹
+              {t('excel.match.remoteFolder')}
             </Button>
             {integrityFolder && (
               <Tag color={integrityIsRemote ? 'blue' : 'default'}>
-                {integrityIsRemote ? '远程: ' : ''}{integrityFolder}
+                {integrityIsRemote ? t('excel.integrity.remotePrefix') : ''}{integrityFolder}
               </Tag>
             )}
           </Space>
@@ -931,12 +956,12 @@ export const ExcelCheck: React.FC = () => {
           {integrityFolder && !integrityIsRemote && (
             <div style={{ marginTop: 8 }}>
               {scanningTree ? (
-                <Spin tip="扫描中..." />
+                <Spin tip={t('excel.match.scanning')} />
               ) : integrityFolderTree && integrityFolderTree.length > 0 ? (
                 <>
                   <div style={{ marginBottom: 8 }}>
                     <Text type="secondary">
-                      共 {integrityTreeInfo?.folders} 个子文件夹，{integrityTreeInfo?.files} 个文件
+{t('excel.integrity.treeSummary', { folders: integrityTreeInfo?.folders ?? 0, files: integrityTreeInfo?.files ?? 0 })}
                     </Text>
                   </div>
                   <Tree
@@ -959,16 +984,16 @@ export const ExcelCheck: React.FC = () => {
       </Card>
   
       {/* 必需文件模板 */}
-      <Card size="small" title="3. 配置必需文件模板">
+      <Card size="small" title={t('excel.integrity.step3Title')}>
         <Space direction="vertical" style={{ width: '100%' }}>
           <Alert
             type="info"
-            message="使用 {name} 作为姓名占位符，如：{name}.docx 会被替换为 张三.docx。每行一个模板。"
+            message={t('excel.integrity.templateHint')}
             style={{ marginBottom: 8 }}
           />
   
           <TextArea
-            placeholder="每行输入一个模板，例如：\n{name}.docx\n{name}照片\n{name}身份证.jpg"
+            placeholder={t('excel.integrity.templatePlaceholder')}
             value={templates.join('\n')}
             onChange={(e) => {
               const lines = e.target.value.split('\n').filter(line => line.trim());
@@ -978,23 +1003,23 @@ export const ExcelCheck: React.FC = () => {
             style={{ width: '100%', fontFamily: 'monospace' }}
           />
   
-          <Text type="secondary">当前模板数量：{templates.length} 个</Text>
+          <Text type="secondary">{t('excel.integrity.templateCount', { count: templates.length })}</Text>
         </Space>
       </Card>
   
       {/* 姓名提取规则 - 仅扫描模式显示 */}
       {integritySource === 'folder' && (
-        <Card size="small" title="4. 姓名提取规则">
+        <Card size="small" title={t('excel.integrity.step4Title')}>
           <Space>
-            <Text>从文件夹名提取姓名:</Text>
+            <Text>{t('excel.integrity.nameExtractLabel')}</Text>
             <Radio.Group value={namePattern} onChange={(e) => setNamePattern(e.target.value)}>
-              <Radio.Button value="auto">自动提取中文</Radio.Button>
-              <Radio.Button value="">使用完整名称</Radio.Button>
+              <Radio.Button value="auto">{t('excel.integrity.nameExtractAuto')}</Radio.Button>
+              <Radio.Button value="">{t('excel.integrity.nameExtractFull')}</Radio.Button>
             </Radio.Group>
           </Space>
           <div style={{ marginTop: 8 }}>
             <Text type="secondary">
-              自动提取示例: "2025-0001王宏琳" → "王宏琳"
+              {t('excel.integrity.nameExtractExample')}
             </Text>
           </div>
         </Card>
@@ -1014,19 +1039,19 @@ export const ExcelCheck: React.FC = () => {
         }
         block
       >
-        {integritySource === 'excel' ? '开始检查并标注到 Excel' : '开始检查并导出报告'}
+        {integritySource === 'excel' ? t('excel.integrity.startCheckAnnotate') : t('excel.integrity.startCheckExport')}
       </Button>
   
       {/* 基于 Excel 的检查结果 */}
       {integritySource === 'excel' && excelIntegrityResult && (
-        <Card size="small" title="检查结果">
+        <Card size="small" title={t('excel.integrity.resultTitle')}>
           <Row gutter={16} style={{ marginBottom: 16 }}>
             <Col span={6}>
-              <Statistic title="总行数" value={excelIntegrityResult.totalRows} />
+              <Statistic title={t('excel.integrity.statTotalRows')} value={excelIntegrityResult.totalRows} />
             </Col>
             <Col span={6}>
               <Statistic
-                title="完整"
+                title={t('excel.integrity.statComplete')}
                 value={excelIntegrityResult.completeCount}
                 valueStyle={{ color: '#52c41a' }}
                 prefix={<CheckCircleOutlined />}
@@ -1034,7 +1059,7 @@ export const ExcelCheck: React.FC = () => {
             </Col>
             <Col span={6}>
               <Statistic
-                title="缺失文件"
+                title={t('excel.integrity.statMissingFiles')}
                 value={excelIntegrityResult.incompleteCount}
                 valueStyle={{ color: '#ff4d4f' }}
                 prefix={<CloseCircleOutlined />}
@@ -1042,7 +1067,7 @@ export const ExcelCheck: React.FC = () => {
             </Col>
             <Col span={6}>
               <Statistic
-                title="未找到文件夹"
+                title={t('excel.integrity.statFolderNotFound')}
                 value={excelIntegrityResult.notFoundCount}
                 valueStyle={{ color: '#faad14' }}
               />
@@ -1052,7 +1077,7 @@ export const ExcelCheck: React.FC = () => {
           {excelIntegrityResult.outputPath && (
             <Alert
               type="success"
-              message={`检查结果已标注到: ${excelIntegrityResult.outputPath}`}
+              message={t('excel.integrity.annotatedAlert', { path: excelIntegrityResult.outputPath })}
               style={{ marginBottom: 16 }}
             />
           )}
@@ -1060,17 +1085,17 @@ export const ExcelCheck: React.FC = () => {
           <Table
             dataSource={excelIntegrityResult.items.filter(item => !item.isComplete)}
             columns={[
-              { title: '行号', dataIndex: 'rowIndex', key: 'rowIndex', width: 60 },
-              { title: '姓名', dataIndex: 'name', key: 'name', width: 100 },
+              { title: t('excel.integrity.colRowIndex'), dataIndex: 'rowIndex', key: 'rowIndex', width: 60 },
+              { title: t('excel.integrity.colName'), dataIndex: 'name', key: 'name', width: 100 },
               {
-                title: '文件夹',
+                title: t('excel.integrity.colFolder'),
                 key: 'folder',
                 width: 120,
                 render: (_: unknown, record: ExcelIntegrityItem) => 
                   record.folderFound ? (
-                    <Tag color="success">已找到</Tag>
+                    <Tag color="success">{t('excel.integrity.folderFound')}</Tag>
                   ) : (
-                    <Tag color="warning">未找到</Tag>
+                    <Tag color="warning">{t('excel.integrity.folderNotFound')}</Tag>
                   ),
               },
               ...templates.map((template, idx) => ({
@@ -1090,7 +1115,7 @@ export const ExcelCheck: React.FC = () => {
             rowKey="rowIndex"
             size="small"
             pagination={{ pageSize: 10 }}
-            title={() => <Text strong>缺失项列表</Text>}
+            title={() => <Text strong>{t('excel.match.missingListTitle')}</Text>}
             rowClassName={(record) => (!record.isComplete ? 'row-missing' : '')}
           />
         </Card>
@@ -1098,14 +1123,14 @@ export const ExcelCheck: React.FC = () => {
   
       {/* 扫描模式的检查结果 */}
       {integritySource === 'folder' && integrityResult && (
-        <Card size="small" title="检查结果">
+        <Card size="small" title={t('excel.integrity.resultTitle')}>
           <Row gutter={16} style={{ marginBottom: 16 }}>
             <Col span={8}>
-              <Statistic title="总文件夹数" value={integrityResult.totalFolders} />
+              <Statistic title={t('excel.integrity.statTotalFolders')} value={integrityResult.totalFolders} />
             </Col>
             <Col span={8}>
               <Statistic
-                title="完整"
+                title={t('excel.integrity.statComplete')}
                 value={integrityResult.completeCount}
                 valueStyle={{ color: '#52c41a' }}
                 prefix={<CheckCircleOutlined />}
@@ -1113,7 +1138,7 @@ export const ExcelCheck: React.FC = () => {
             </Col>
             <Col span={8}>
               <Statistic
-                title="缺失"
+                title={t('excel.integrity.statusMissing')}
                 value={integrityResult.incompleteCount}
                 valueStyle={{ color: '#ff4d4f' }}
                 prefix={<CloseCircleOutlined />}
@@ -1124,7 +1149,7 @@ export const ExcelCheck: React.FC = () => {
           {integrityResult.outputPath && (
             <Alert
               type="success"
-              message={`检查报告已保存到: ${integrityResult.outputPath}`}
+              message={t('excel.integrity.reportSavedAlert', { path: integrityResult.outputPath })}
               style={{ marginBottom: 16 }}
             />
           )}
@@ -1148,7 +1173,7 @@ export const ExcelCheck: React.FC = () => {
       label: (
         <span>
           <FileExcelOutlined />
-          Excel 比对
+          {t('excel.tabMatch')}
         </span>
       ),
       children: renderMatchTab(),
@@ -1158,7 +1183,7 @@ export const ExcelCheck: React.FC = () => {
       label: (
         <span>
           <FolderOpenOutlined />
-          完整性检查
+          {t('excel.tabIntegrity')}
         </span>
       ),
       children: renderIntegrityTab(),
@@ -1174,7 +1199,7 @@ export const ExcelCheck: React.FC = () => {
       overflow: 'hidden' 
     }}>
       <Title level={4} style={{ marginBottom: 16, flexShrink: 0 }}>
-        <FileExcelOutlined /> 智能检查
+        <FileExcelOutlined /> {t('excel.pageTitle')}
       </Title>
 
       <Tabs 
@@ -1192,7 +1217,7 @@ export const ExcelCheck: React.FC = () => {
 
       {/* 保存配置弹窗 */}
       <Modal
-        title={editingConfigId ? '更新配置' : '保存配置'}
+        title={editingConfigId ? t('excel.config.modalUpdate') : t('excel.config.modalSave')}
         open={saveConfigModalVisible}
         onOk={handleSaveConfig}
         onCancel={() => {
@@ -1200,14 +1225,14 @@ export const ExcelCheck: React.FC = () => {
           setConfigName('');
           setEditingConfigId(null);
         }}
-        okText="保存"
-        cancelText="取消"
+        okText={t('excel.config.okSave')}
+        cancelText={t('excel.config.cancel')}
       >
         <Space direction="vertical" style={{ width: '100%' }}>
           <div>
-            <Text strong>配置名称</Text>
+            <Text strong>{t('excel.config.labelName')}</Text>
             <Input
-              placeholder="请输入配置名称，如：案件归档检查"
+              placeholder={t('excel.config.namePlaceholder')}
               value={configName}
               onChange={(e) => setConfigName(e.target.value)}
               style={{ marginTop: 8 }}
@@ -1217,10 +1242,10 @@ export const ExcelCheck: React.FC = () => {
             type="info"
             message={
               <>
-                <div><strong>将保存的内容：</strong></div>
-                <div>目标文件夹: {integrityFolder || '(未选择)'}</div>
-                <div>检查模板: {templates.length} 个</div>
-                <div>姓名提取: {namePattern === 'auto' ? '自动提取中文' : '使用完整名称'}</div>
+                <div><strong>{t('excel.config.previewTitle')}</strong></div>
+                <div>{t('excel.config.previewTargetFolder', { path: integrityFolder || t('excel.config.previewNotSelected') })}</div>
+                <div>{t('excel.config.previewTemplates', { count: templates.length })}</div>
+                <div>{t('excel.config.previewNameExtract', { mode: namePattern === 'auto' ? t('excel.config.previewNameExtractAuto') : t('excel.config.previewNameExtractFull') })}</div>
               </>
             }
           />

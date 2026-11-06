@@ -1,6 +1,7 @@
 import React from 'react';
 import { Progress, Card, Typography, Space, Tag } from 'antd';
 import { HddOutlined, UsbOutlined } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import { DiskInfo } from '../../types';
 import { formatSize } from '../../utils';
 import { useThemeColors } from '../../hooks';
@@ -12,6 +13,7 @@ interface DiskCardProps {
 }
 
 export const DiskCard: React.FC<DiskCardProps> = ({ disk }) => {
+  const { t } = useTranslation();
   const colors = useThemeColors();
   
   const getProgressColor = (percent: number) => {
@@ -66,7 +68,7 @@ export const DiskCard: React.FC<DiskCardProps> = ({ disk }) => {
         <div style={{ display: 'flex', justifyContent: 'space-between' }}>
           <div>
             <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
-              已用
+              {t('disk.card.used')}
             </Text>
             <Text style={{ color: colors.textPrimary, fontWeight: 500 }}>
               {formatSize(disk.used_space)}
@@ -74,7 +76,7 @@ export const DiskCard: React.FC<DiskCardProps> = ({ disk }) => {
           </div>
           <div style={{ textAlign: 'center' }}>
             <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
-              可用
+              {t('disk.card.available')}
             </Text>
             <Text style={{ color: colors.accentGreen, fontWeight: 500 }}>
               {formatSize(disk.available_space)}
@@ -82,7 +84,7 @@ export const DiskCard: React.FC<DiskCardProps> = ({ disk }) => {
           </div>
           <div style={{ textAlign: 'right' }}>
             <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
-              总计
+              {t('disk.card.total')}
             </Text>
             <Text style={{ color: colors.textPrimary, fontWeight: 500 }}>
               {formatSize(disk.total_space)}
@@ -91,7 +93,7 @@ export const DiskCard: React.FC<DiskCardProps> = ({ disk }) => {
         </div>
 
         <Text type="secondary" style={{ fontSize: 11 }}>
-          文件系统: {disk.file_system}
+          {t('disk.card.fileSystem', { fileSystem: disk.file_system })}
         </Text>
       </Space>
     </Card>

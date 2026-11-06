@@ -48,6 +48,9 @@ encoding_rs = "0.8"
 # Parallel processing
 rayon = "1.10"
 
+# Content fingerprint for duplicate detection
+sha2 = "0.10"
+
 # Excel processing
 calamine = "0.26"
 rust_xlsxwriter = "0.79"

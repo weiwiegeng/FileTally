@@ -7,7 +7,9 @@ import {
   GlobalOutlined,
   FolderOutlined,
 } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import { useRemoteStore, RemoteConnection } from '../../stores';
+import { mapBackendError } from '../../utils/backendError';
 
 interface ConnectionFormProps {
   editingConnection?: RemoteConnection;
@@ -20,6 +22,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
   onSuccess,
   onCancel,
 }) => {
+  const { t } = useTranslation();
   const [form] = Form.useForm();
   const { addConnection, updateConnection } = useRemoteStore();
 
@@ -27,15 +30,15 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
     try {
       if (editingConnection) {
         updateConnection(editingConnection.id, values);
-        message.success('连接配置已更新');
+        message.success(t('remote.connectionForm.updateSuccess'));
       } else {
         addConnection(values);
-        message.success('连接已添加');
+        message.success(t('remote.connectionForm.addSuccess'));
       }
       form.resetFields();
       onSuccess?.();
     } catch (err) {
-      message.error('保存失败: ' + String(err));
+      message.error(t('remote.connectionForm.saveFailed', { error: mapBackendError(err) }));
     }
   };
 
@@ -52,88 +55,86 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
     >
       <Form.Item
         name="name"
-        label="连接名称"
-        rules={[{ required: true, message: '请输入连接名称' }]}
+        label={t('remote.connectionForm.labelName')}
+        rules={[{ required: true, message: t('remote.connectionForm.nameRequired') }]}
       >
         <Input
           prefix={<CloudServerOutlined style={{ color: '#8c8c8c' }} />}
-          placeholder="例如: 公司NAS"
+          placeholder={t('remote.connectionForm.namePlaceholder')}
         />
       </Form.Item>
 
       <Form.Item
         name="type"
-        label="连接类型"
+        label={t('remote.connectionForm.labelType')}
         rules={[{ required: true }]}
       >
         <Select
           options={[
-            { value: 'smb', label: 'SMB/CIFS (Windows共享/NAS)' },
-            { value: 'nfs', label: 'NFS (Linux/Unix)' },
-            { value: 'ftp', label: 'FTP/SFTP' },
+            { value: 'smb', label: t('remote.connectionForm.typeSmb') },
           ]}
         />
       </Form.Item>
 
       <Form.Item
         name="host"
-        label="主机地址"
-        rules={[{ required: true, message: '请输入主机地址' }]}
+        label={t('remote.connectionForm.labelHost')}
+        rules={[{ required: true, message: t('remote.connectionForm.hostRequired') }]}
       >
         <Input
           prefix={<GlobalOutlined style={{ color: '#8c8c8c' }} />}
-          placeholder="IP地址或主机名，例如: 192.168.1.100"
+          placeholder={t('remote.connectionForm.hostPlaceholder')}
         />
       </Form.Item>
 
       <Form.Item
         name="port"
-        label="端口"
+        label={t('remote.connectionForm.labelPort')}
       >
         <InputNumber
           style={{ width: '100%' }}
-          placeholder="默认: SMB=445, FTP=21"
+          placeholder={t('remote.connectionForm.portPlaceholder')}
         />
       </Form.Item>
 
       <Form.Item
         name="share"
-        label="共享名称"
-        rules={[{ required: true, message: '请输入共享名称' }]}
+        label={t('remote.connectionForm.labelShare')}
+        rules={[{ required: true, message: t('remote.connectionForm.shareRequired') }]}
       >
         <Input
           prefix={<FolderOutlined style={{ color: '#8c8c8c' }} />}
-          placeholder="共享文件夹名称"
+          placeholder={t('remote.connectionForm.sharePlaceholder')}
         />
       </Form.Item>
 
       <Form.Item
         name="username"
-        label="用户名"
+        label={t('remote.connectionForm.labelUsername')}
       >
         <Input
           prefix={<UserOutlined style={{ color: '#8c8c8c' }} />}
-          placeholder="可选，留空则使用访客登录"
+          placeholder={t('remote.connectionForm.usernamePlaceholder')}
         />
       </Form.Item>
 
       <Form.Item
         name="password"
-        label="密码"
+        label={t('remote.connectionForm.labelPassword')}
       >
         <Input.Password
           prefix={<LockOutlined style={{ color: '#8c8c8c' }} />}
-          placeholder="可选"
+          placeholder={t('remote.connectionForm.passwordPlaceholder')}
         />
       </Form.Item>
 
       <Form.Item>
         <Space>
           <Button type="primary" htmlType="submit">
-            {editingConnection ? '保存修改' : '添加连接'}
+            {editingConnection ? t('remote.connectionForm.submitSave') : t('remote.connectionForm.submitAdd')}
           </Button>
           {onCancel && (
-            <Button onClick={onCancel}>取消</Button>
+            <Button onClick={onCancel}>{t('remote.connectionForm.cancel')}</Button>
           )}
         </Space>
       </Form.Item>

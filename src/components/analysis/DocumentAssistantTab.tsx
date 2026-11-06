@@ -27,8 +27,10 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { useSettingsStore } from '../../stores';
 import { useThemeColors } from '../../hooks';
+import { useTranslation } from 'react-i18next';
 import { getAIService, ChatMessage } from '../../services/aiService';
 import { getPathName } from '../../utils/format';
+import { mapBackendError } from '../../utils/backendError';
 
 const { Text, Title, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -49,7 +51,8 @@ interface ConversationMessage {
 export const DocumentAssistantTab: React.FC = () => {
   const { settings } = useSettingsStore();
   const colors = useThemeColors();
-  
+  const { t } = useTranslation();
+
   const [selectedDocument, setSelectedDocument] = useState<DocumentInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingDocument, setLoadingDocument] = useState(false);
@@ -67,10 +70,10 @@ export const DocumentAssistantTab: React.FC = () => {
     try {
       const selected = await open({
         multiple: false,
-        title: '选择文档',
+        title: t('analysis.document.dialogSelectDoc'),
         filters: [
-          { name: '文档', extensions: ['pdf', 'txt', 'md', 'json', 'xml', 'html'] },
-          { name: '所有文件', extensions: ['*'] },
+          { name: t('analysis.document.filterDocuments'), extensions: ['pdf', 'txt', 'md', 'json', 'xml', 'html'] },
+          { name: t('analysis.document.filterAllFiles'), extensions: ['*'] },
         ],
       });
       
@@ -95,29 +98,29 @@ export const DocumentAssistantTab: React.FC = () => {
           });
           
           if (!preview.content) {
-            message.warning('无法读取文件内容，可能是二进制文件或编码问题');
+            message.warning(t('analysis.document.readWarning'));
           }
         } catch (err) {
-          console.error('读取文件失败:', err);
-          message.error('读取文件失败');
+          console.error('read file failed:', err);
+          message.error(t('analysis.document.readFailed'));
         } finally {
           setLoadingDocument(false);
         }
       }
     } catch (err) {
-      console.error('选择文件失败:', err);
+      console.error('select file failed:', err);
     }
   };
 
   // 生成摘要
   const handleGenerateSummary = async () => {
     if (!selectedDocument?.content) {
-      message.error('请先选择一个有效的文档');
+      message.error(t('analysis.document.needDocument'));
       return;
     }
 
     if (!isAIConfigured) {
-      message.error('请先在设置中配置 AI 模型');
+      message.error(t('analysis.document.needAiConfig'));
       return;
     }
 
@@ -129,10 +132,10 @@ export const DocumentAssistantTab: React.FC = () => {
         selectedDocument.name
       );
       setSummary(result);
-      message.success('摘要生成成功');
-    } catch (err: any) {
-      console.error('生成摘要失败:', err);
-      message.error(`生成摘要失败: ${err.message}`);
+      message.success(t('analysis.document.summarySuccess'));
+    } catch (err: unknown) {
+      console.error('summary failed:', err);
+      message.error(t('analysis.document.summaryFailed', { error: mapBackendError(err) }));
     } finally {
       setLoading(false);
     }
@@ -143,12 +146,12 @@ export const DocumentAssistantTab: React.FC = () => {
     if (!inputQuestion.trim()) return;
     
     if (!selectedDocument?.content) {
-      message.error('请先选择一个有效的文档');
+      message.error(t('analysis.document.needDocument'));
       return;
     }
 
     if (!isAIConfigured) {
-      message.error('请先在设置中配置 AI 模型');
+      message.error(t('analysis.document.needAiConfig'));
       return;
     }
 
@@ -184,9 +187,9 @@ export const DocumentAssistantTab: React.FC = () => {
       setTimeout(() => {
         conversationEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       }, 100);
-    } catch (err: any) {
-      console.error('问答失败:', err);
-      message.error(`问答失败: ${err.message}`);
+    } catch (err: unknown) {
+      console.error('qa failed:', err);
+      message.error(t('analysis.document.qaFailed', { error: mapBackendError(err) }));
       
       // 移除用户消息
       setConversation(prev => prev.slice(0, -1));
@@ -199,7 +202,7 @@ export const DocumentAssistantTab: React.FC = () => {
   // 复制内容
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text);
-    message.success('已复制到剪贴板');
+    message.success(t('analysis.document.copied'));
   };
 
   // 清空对话
@@ -222,12 +225,12 @@ export const DocumentAssistantTab: React.FC = () => {
       {/* AI 配置提示 */}
       {!isAIConfigured && (
         <Alert
-          message="AI 未配置"
+          message={t('analysis.document.alertNotConfigured')}
           description={
             <Space>
-              <span>请先在设置中配置 AI 模型（API Key 或本地 Ollama）</span>
+              <span>{t('analysis.document.alertConfigureHint')}</span>
               <Button size="small" icon={<SettingOutlined />}>
-                前往设置
+                {t('analysis.document.goSettings')}
               </Button>
             </Space>
           }
@@ -242,7 +245,7 @@ export const DocumentAssistantTab: React.FC = () => {
         title={
           <Space>
             <FileTextOutlined style={{ color: colors.accentBlue }} />
-            <span>选择文档</span>
+            <span>{t('analysis.document.selectDocument')}</span>
           </Space>
         }
         extra={
@@ -257,7 +260,7 @@ export const DocumentAssistantTab: React.FC = () => {
                 setConversation([]);
               }}
             >
-              清除
+              {t('analysis.document.clear')}
             </Button>
           )
         }
@@ -269,7 +272,7 @@ export const DocumentAssistantTab: React.FC = () => {
           <div style={{ textAlign: 'center', padding: 20 }}>
             <Spin />
             <div style={{ marginTop: 8 }}>
-              <Text type="secondary">正在读取文档...</Text>
+              <Text type="secondary">{t('analysis.document.reading')}</Text>
             </div>
           </div>
         ) : selectedDocument ? (
@@ -279,7 +282,7 @@ export const DocumentAssistantTab: React.FC = () => {
               <div>
                 <Text strong>{selectedDocument.name}</Text>
                 <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
-                  {formatSize(selectedDocument.size)} · {selectedDocument.content.length} 字符
+                  {t('analysis.document.metaSizeChars', { size: formatSize(selectedDocument.size), count: selectedDocument.content.length })}
                 </Text>
               </div>
             </Space>
@@ -292,10 +295,10 @@ export const DocumentAssistantTab: React.FC = () => {
                 loading={loading && !conversation.length}
                 disabled={!isAIConfigured}
               >
-                生成摘要
+                {t('analysis.document.generateSummary')}
               </Button>
               <Button size="small" icon={<FileAddOutlined />} onClick={handleSelectDocument}>
-                更换
+                {t('analysis.document.replace')}
               </Button>
             </Space>
           </div>
@@ -304,12 +307,12 @@ export const DocumentAssistantTab: React.FC = () => {
             <FileAddOutlined style={{ fontSize: 36, color: colors.border, marginBottom: 12 }} />
             <div>
               <Button type="primary" icon={<FileAddOutlined />} onClick={handleSelectDocument}>
-                选择文档
+                {t('analysis.document.selectDocument')}
               </Button>
             </div>
             <div style={{ marginTop: 8 }}>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                支持 PDF、TXT、Markdown、JSON 等文本格式
+                {t('analysis.document.supportedFormats')}
               </Text>
             </div>
           </div>
@@ -322,7 +325,7 @@ export const DocumentAssistantTab: React.FC = () => {
           title={
             <Space>
               <RobotOutlined style={{ color: colors.accentGreen }} />
-              <span>文档摘要</span>
+              <span>{t('analysis.document.summaryTitle')}</span>
             </Space>
           }
           extra={
@@ -331,7 +334,7 @@ export const DocumentAssistantTab: React.FC = () => {
               icon={<CopyOutlined />}
               onClick={() => handleCopy(summary)}
             >
-              复制
+              {t('analysis.document.copy')}
             </Button>
           }
           style={{ marginBottom: 16, background: colors.bgCard, flexShrink: 0, maxHeight: 200, overflow: 'auto' }}
@@ -349,7 +352,7 @@ export const DocumentAssistantTab: React.FC = () => {
           title={
             <Space>
               <SendOutlined style={{ color: colors.accentPurple }} />
-              <span>智能问答</span>
+              <span>{t('analysis.document.qaTitle')}</span>
             </Space>
           }
           extra={
@@ -359,7 +362,7 @@ export const DocumentAssistantTab: React.FC = () => {
                 icon={<DeleteOutlined />}
                 onClick={handleClearConversation}
               >
-                清空对话
+                {t('analysis.document.clearConversation')}
               </Button>
             )
           }
@@ -427,7 +430,7 @@ export const DocumentAssistantTab: React.FC = () => {
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: colors.textSecondary }}>
                 <RobotOutlined style={{ fontSize: 40, marginBottom: 12, opacity: 0.4 }} />
-                <div style={{ fontSize: 13 }}>输入问题开始对话</div>
+                <div style={{ fontSize: 13 }}>{t('analysis.document.qaEmpty')}</div>
               </div>
             )}
           </div>
@@ -438,7 +441,7 @@ export const DocumentAssistantTab: React.FC = () => {
               <TextArea
                 value={inputQuestion}
                 onChange={(e) => setInputQuestion(e.target.value)}
-                placeholder="输入关于文档的问题..."
+                placeholder={t('analysis.document.qaPlaceholder')}
                 autoSize={{ minRows: 1, maxRows: 4 }}
                 onPressEnter={(e) => {
                   if (!e.shiftKey) {
@@ -455,12 +458,12 @@ export const DocumentAssistantTab: React.FC = () => {
                 loading={loading}
                 disabled={!inputQuestion.trim() || !isAIConfigured}
               >
-                发送
+                {t('analysis.document.send')}
               </Button>
             </Space.Compact>
             <div style={{ marginTop: 4 }}>
               <Text type="secondary" style={{ fontSize: 11 }}>
-                按 Enter 发送，Shift + Enter 换行
+                {t('analysis.document.qaShortcutHint')}
               </Text>
             </div>
           </div>
@@ -474,9 +477,9 @@ export const DocumentAssistantTab: React.FC = () => {
             image={<RobotOutlined style={{ fontSize: 64, color: colors.border }} />}
             description={
               <Space direction="vertical">
-                <Text type="secondary">选择文档开始使用文档助手</Text>
+                <Text type="secondary">{t('analysis.document.pageEmptyTitle')}</Text>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  支持生成摘要、智能问答等功能
+                  {t('analysis.document.pageEmptyHint')}
                 </Text>
               </Space>
             }
