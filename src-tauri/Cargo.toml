@@ -32,6 +32,9 @@ walkdir = "2.5"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
+# In-app SMB (LAN NAS direct mode)
+smb2 = "0.43"
+
 # Error handling
 anyhow = "1.0"
 thiserror = "2.0"

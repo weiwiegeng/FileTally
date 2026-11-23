@@ -383,10 +383,24 @@ fn commit_overwrite(staging: &Path, target: &Path) -> std::io::Result<Option<Bac
 
 /// 获取路径信息（文件或文件夹）
 #[tauri::command]
-pub async fn get_path_info(path: String) -> Result<PathInfo, String> {
-    let p = Path::new(&path);
-
+pub async fn get_path_info(
+    store: tauri::State<'_, std::sync::Arc<crate::commands::remote::SmbSessionStore>>,
+    path: String,
+) -> Result<PathInfo, String> {
     crate::path_util::validate_user_path(&path)?;
+
+    if crate::path_util::is_remote_path(&path) {
+        let info = crate::commands::remote::remote_path_info(store, path).await?;
+        return Ok(PathInfo {
+            path: info.path,
+            name: info.name,
+            is_dir: info.is_dir,
+            size: info.size,
+            size_formatted: info.size_formatted,
+        });
+    }
+
+    let p = Path::new(&path);
     if !p.exists() {
         return Err(crate::err::code("path_not_found"));
     }
@@ -415,10 +429,27 @@ pub async fn get_path_info(path: String) -> Result<PathInfo, String> {
 
 /// 列出文件夹内容
 #[tauri::command]
-pub async fn list_folder_contents(path: String) -> Result<Vec<PathInfo>, String> {
-    let dir_path = Path::new(&path);
-
+pub async fn list_folder_contents(
+    store: tauri::State<'_, std::sync::Arc<crate::commands::remote::SmbSessionStore>>,
+    path: String,
+) -> Result<Vec<PathInfo>, String> {
     crate::path_util::validate_user_path(&path)?;
+
+    if crate::path_util::is_remote_path(&path) {
+        let entries = crate::commands::remote::list_remote_dir(store, path).await?;
+        return Ok(entries
+            .into_iter()
+            .map(|e| PathInfo {
+                path: e.path,
+                name: e.name,
+                is_dir: e.is_dir,
+                size: e.size,
+                size_formatted: e.size_formatted,
+            })
+            .collect());
+    }
+
+    let dir_path = Path::new(&path);
     if !dir_path.exists() {
         return Err(crate::err::code("path_not_found"));
     }
@@ -479,12 +510,49 @@ fn format_size(size: u64) -> String {
 /// 检查文件传输冲突
 #[tauri::command]
 pub async fn check_transfer_conflicts(
+    store: tauri::State<'_, std::sync::Arc<crate::commands::remote::SmbSessionStore>>,
     source_paths: Vec<String>,
     target_path: String,
 ) -> Result<CheckConflictsResponse, String> {
-    let target_dir = Path::new(&target_path);
-
     crate::path_util::validate_user_path(&target_path)?;
+
+    // Remote targets: best-effort conflict detection via SMB stat
+    if crate::path_util::is_remote_path(&target_path) {
+        let mut conflicts = Vec::new();
+        for source_path in &source_paths {
+            let name = Path::new(source_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+            let (conn_id, rel) = crate::path_util::parse_remote_path(&target_path)?;
+            let child = if rel.is_empty() {
+                name.to_string()
+            } else {
+                format!("{rel}/{name}")
+            };
+            let child_path = crate::path_util::join_remote_path(&conn_id, &child);
+            if crate::commands::remote::remote_path_exists(store.clone(), child_path.clone())
+                .await
+                .unwrap_or(false)
+            {
+                conflicts.push(ConflictFile {
+                    source_path: source_path.clone(),
+                    target_path: child_path,
+                    file_name: name.to_string(),
+                    source_size: 0,
+                    target_size: 0,
+                    source_size_formatted: String::new(),
+                    target_size_formatted: String::new(),
+                });
+            }
+        }
+        return Ok(CheckConflictsResponse {
+            has_conflicts: !conflicts.is_empty(),
+            conflicts,
+        });
+    }
+
+    let target_dir = Path::new(&target_path);
     if !target_dir.exists() {
         return Err(crate::err::code("target_dir_missing"));
     }
@@ -587,11 +655,27 @@ fn validate_conflict_resolution(resolution: &str) -> Result<&str, String> {
 #[tauri::command]
 pub async fn transfer_files(
     app: AppHandle,
+    store: tauri::State<'_, std::sync::Arc<crate::commands::remote::SmbSessionStore>>,
     source_paths: Vec<String>,
     target_path: String,
     conflict_resolution: String,
     job_id: Option<u64>,
 ) -> Result<TransferResult, String> {
+    let involves_remote = crate::path_util::is_remote_path(&target_path)
+        || source_paths
+            .iter()
+            .any(|p| crate::path_util::is_remote_path(p));
+
+    if involves_remote {
+        return crate::commands::remote::transfer_files_remote(
+            store,
+            source_paths,
+            target_path,
+            conflict_resolution,
+        )
+        .await;
+    }
+
     tokio::task::spawn_blocking(move || {
         transfer_files_sync(app, source_paths, target_path, conflict_resolution, job_id)
     })

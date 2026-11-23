@@ -31,19 +31,30 @@ interface RemoteFolderSelectorProps {
   onSelect: (path: string, connectionName?: string) => void;
 }
 
+const joinRemoteSubpath = (base: string, sub: string) => {
+  const cleaned = sub.replace(/^[/\\]+/, '').replace(/\\/g, '/');
+  if (!cleaned) return base.endsWith('/') ? base : `${base}/`;
+  if (base.startsWith('remote://')) {
+    const root = base.endsWith('/') ? base.slice(0, -1) : base;
+    return `${root}/${cleaned}`;
+  }
+  const sep = base.includes('\\') ? '\\' : '/';
+  return `${base.replace(/[/\\]+$/, '')}${sep}${cleaned.split('/').join(sep)}`;
+};
+
 export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
   open: isOpen,
   onClose,
   onSelect,
 }) => {
   const { t } = useTranslation();
-  const { connections } = useRemoteStore();
+  const { connections, getAccessRoot, connect } = useRemoteStore();
   const colors = useThemeColors();
   const [selectedConnection, setSelectedConnection] = useState<RemoteConnection | null>(null);
   const [subPath, setSubPath] = useState('');
   const [checking, setChecking] = useState(false);
+  const [connectingId, setConnectingId] = useState<string | null>(null);
 
-  // 重置状态
   useEffect(() => {
     if (!isOpen) {
       setSelectedConnection(null);
@@ -51,28 +62,43 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
     }
   }, [isOpen]);
 
-  // 优先使用连接时检测到的挂载点
-  const getMountPath = (conn: RemoteConnection) => {
-    if (conn.mountPoint) return conn.mountPoint;
-    if (conn.share) return `/Volumes/${conn.share}`;
-    return `/Volumes/${conn.name}`;
-  };
+  const getMountPath = (conn: RemoteConnection) => getAccessRoot(conn);
 
-  // 检查路径是否存在
   const checkPathExists = async (path: string): Promise<boolean> => {
     try {
-      const exists = await invoke<boolean>('check_path_exists', { path });
-      return exists;
+      return await invoke<boolean>('check_path_exists', { path });
     } catch {
       return false;
     }
   };
 
-  // 选择子目录
+  const ensureConnected = async (conn: RemoteConnection): Promise<RemoteConnection | null> => {
+    if (conn.status === 'connected' && conn.mountPoint) {
+      return conn;
+    }
+    setConnectingId(conn.id);
+    const ok = await connect(conn.id);
+    setConnectingId(null);
+    if (!ok) {
+      const latest = useRemoteStore.getState().connections.find((c) => c.id === conn.id);
+      message.error(latest?.error || t('remote.connectionList.connectFailedFallback'));
+      return null;
+    }
+    return useRemoteStore.getState().connections.find((c) => c.id === conn.id) || null;
+  };
+
   const handleSelectSubFolder = async () => {
     if (!selectedConnection) return;
 
-    const basePath = getMountPath(selectedConnection);
+    const live = await ensureConnected(selectedConnection);
+    if (!live) return;
+    setSelectedConnection(live);
+
+    const basePath = getMountPath(live);
+    if (basePath.startsWith('remote://')) {
+      message.info(t('search.remoteFolderSelector.directSubdirHint'));
+      return;
+    }
 
     try {
       const selected = await open({
@@ -83,7 +109,7 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
       });
 
       if (selected) {
-        onSelect(selected as string, selectedConnection?.name);
+        onSelect(selected as string, live.name);
         onClose();
       }
     } catch (err) {
@@ -91,26 +117,31 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
     }
   };
 
-  // 确认选择
   const handleConfirm = async () => {
     if (!selectedConnection) return;
 
     setChecking(true);
-    const basePath = getMountPath(selectedConnection);
-    const fullPath = subPath ? `${basePath}/${subPath}` : basePath;
+    const live = await ensureConnected(selectedConnection);
+    if (!live) {
+      setChecking(false);
+      return;
+    }
+    setSelectedConnection(live);
+
+    const basePath = getMountPath(live);
+    const fullPath = subPath ? joinRemoteSubpath(basePath, subPath) : basePath;
 
     const exists = await checkPathExists(fullPath);
     setChecking(false);
 
     if (exists) {
-      onSelect(fullPath, selectedConnection?.name);
+      onSelect(fullPath, live.name);
       onClose();
     } else {
       message.error(t('search.remoteFolderSelector.pathNotExist'));
     }
   };
 
-  // 连接状态标签
   const getStatusTag = (conn: RemoteConnection) => {
     switch (conn.status) {
       case 'connected':
@@ -174,6 +205,11 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
                     <Space>
                       <Text strong>{conn.name}</Text>
                       {getStatusTag(conn)}
+                      <Tag>
+                        {(conn.mode || 'direct') === 'direct'
+                          ? t('remote.connectionList.modeDirect')
+                          : t('remote.connectionList.modeSystem')}
+                      </Tag>
                     </Space>
                   }
                   description={
@@ -227,7 +263,11 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
               onChange={(e) => setSubPath(e.target.value)}
               prefix={<FolderOutlined />}
             />
-            <Button icon={<SearchOutlined />} onClick={handleSelectSubFolder}>
+            <Button
+              icon={<SearchOutlined />}
+              onClick={handleSelectSubFolder}
+              disabled={getMountPath(selectedConnection).startsWith('remote://')}
+            >
               {t('search.remoteFolderSelector.browse')}
             </Button>
           </Space.Compact>
@@ -242,7 +282,9 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
           >
             <Text type="secondary" style={{ fontSize: 12 }}>
               <CheckCircleOutlined style={{ color: colors.accentGreen, marginRight: 8 }} />
-              {t('search.remoteFolderSelector.finderTip')}
+              {(selectedConnection.mode || 'direct') === 'direct'
+                ? t('search.remoteFolderSelector.directTip')
+                : t('search.remoteFolderSelector.finderTip')}
             </Text>
           </div>
 
@@ -252,7 +294,7 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
               type="primary"
               icon={<LinkOutlined />}
               onClick={handleConfirm}
-              loading={checking}
+              loading={checking || connectingId === selectedConnection.id}
             >
               {t('search.remoteFolderSelector.confirm')}
             </Button>

@@ -1,34 +1,34 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { invoke } from '@tauri-apps/api/core';
-import { openUrl } from '@tauri-apps/plugin-opener';
+import { openPath } from '@tauri-apps/plugin-opener';
 import i18n from '../i18n';
 import { mapBackendError } from '../utils/backendError';
+
+export type RemoteConnectionMode = 'direct' | 'system';
 
 export interface RemoteConnection {
   id: string;
   name: string;
   type: 'smb' | 'nfs' | 'ftp';
+  mode: RemoteConnectionMode;
   host: string;
   port?: number;
-  share: string;          // SMB 共享名
+  share: string;
   username?: string;
   password?: string;
-  mountPoint?: string;    // 挂载点
+  /** Local mount point (system) or `remote://{id}/` (direct) */
+  mountPoint?: string;
   lastConnected?: string;
   status: 'disconnected' | 'connecting' | 'connected' | 'error';
   error?: string;
 }
 
 interface RemoteState {
-  // 连接列表
   connections: RemoteConnection[];
-  // 当前选中的连接
   activeConnectionId: string | null;
-  // 连接中状态
   connecting: boolean;
-  
-  // Actions
+
   addConnection: (conn: Omit<RemoteConnection, 'id' | 'status'>) => void;
   updateConnection: (id: string, updates: Partial<RemoteConnection>) => void;
   removeConnection: (id: string) => void;
@@ -36,23 +36,12 @@ interface RemoteState {
   connect: (id: string) => Promise<boolean>;
   disconnect: (id: string) => Promise<void>;
   getConnection: (id: string) => RemoteConnection | undefined;
+  getAccessRoot: (conn: RemoteConnection) => string;
 }
 
-// 生成唯一 ID
 const generateId = () => Math.random().toString(36).substring(2, 15);
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const buildMountCandidates = (conn: RemoteConnection): string[] => {
-  const candidates = new Set<string>();
-  if (conn.share) {
-    candidates.add(`/Volumes/${conn.share}`);
-  }
-  if (conn.name) {
-    candidates.add(`/Volumes/${conn.name}`);
-  }
-  return Array.from(candidates);
-};
+const buildUncPath = (host: string, share: string) => `\\\\${host}\\${share}`;
 
 export const useRemoteStore = create<RemoteState>()(
   persist(
@@ -60,10 +49,11 @@ export const useRemoteStore = create<RemoteState>()(
       connections: [],
       activeConnectionId: null,
       connecting: false,
-      
+
       addConnection: (conn) => {
         const newConnection: RemoteConnection = {
           ...conn,
+          mode: conn.mode || 'direct',
           id: generateId(),
           status: 'disconnected',
         };
@@ -71,7 +61,7 @@ export const useRemoteStore = create<RemoteState>()(
           connections: [...state.connections, newConnection],
         }));
       },
-      
+
       updateConnection: (id, updates) => {
         set((state) => ({
           connections: state.connections.map((c) =>
@@ -79,26 +69,40 @@ export const useRemoteStore = create<RemoteState>()(
           ),
         }));
       },
-      
+
       removeConnection: (id) => {
+        const conn = get().connections.find((c) => c.id === id);
+        if (conn?.mode === 'direct' && conn.status === 'connected') {
+          void invoke('disconnect_smb', { connectionId: id }).catch(() => undefined);
+        }
         set((state) => ({
           connections: state.connections.filter((c) => c.id !== id),
           activeConnectionId: state.activeConnectionId === id ? null : state.activeConnectionId,
         }));
       },
-      
+
       setActiveConnection: (id) => {
         set({ activeConnectionId: id });
       },
-      
+
       getConnection: (id) => {
         return get().connections.find((c) => c.id === id);
       },
-      
+
+      getAccessRoot: (conn) => {
+        if (conn.mountPoint) return conn.mountPoint;
+        if (conn.mode === 'direct') return `remote://${conn.id}/`;
+        // system mode fallbacks
+        if (typeof navigator !== 'undefined' && /Win/i.test(navigator.platform)) {
+          return buildUncPath(conn.host, conn.share);
+        }
+        return `/Volumes/${conn.share}`;
+      },
+
       connect: async (id) => {
-        const { updateConnection, connecting } = get();
+        const { updateConnection, connecting, getAccessRoot } = get();
         const conn = get().connections.find((c) => c.id === id);
-        
+
         if (!conn) return false;
 
         if (connecting) {
@@ -112,79 +116,57 @@ export const useRemoteStore = create<RemoteState>()(
           });
           return false;
         }
-        
+
+        const mode: RemoteConnectionMode = conn.mode || 'direct';
+
         set({ connecting: true });
         updateConnection(id, { status: 'connecting', error: undefined });
-        
+
         try {
-          // 构建 SMB URL，优先打开系统挂载对话框
-          let smbUrl = `smb://${conn.host}`;
-          if (conn.share) {
-            smbUrl += `/${conn.share}`;
-          }
-
-          try {
-            await openUrl(smbUrl);
-          } catch (err) {
-            console.warn('打开 SMB URL 失败，继续检测已有挂载点:', err);
-          }
-
-          const candidates = new Set(buildMountCandidates(conn));
-          try {
-            const volumes = await invoke<string[]>('list_volumes');
-            volumes.forEach((v) => candidates.add(v));
-          } catch {
-            // Windows 等无 /Volumes 时忽略
-          }
-
-          let mountPoint: string | null = null;
-
-          // 轮询挂载点是否可访问（用户可能在 Finder 中确认凭据）
-          for (let attempt = 0; attempt < 12 && !mountPoint; attempt++) {
-            for (const candidate of candidates) {
-              try {
-                const exists = await invoke<boolean>('check_path_exists', { path: candidate });
-                if (!exists) continue;
-                // 优先匹配 share / name
-                const base = candidate.split(/[/\\]/).pop() || '';
-                if (
-                  (conn.share && base === conn.share) ||
-                  (conn.name && base === conn.name) ||
-                  candidates.size === 1
-                ) {
-                  mountPoint = candidate;
-                  break;
-                }
-                // 否则先记下候选，继续找更精确的
-                if (!mountPoint) mountPoint = candidate;
-              } catch {
-                // ignore and retry
-              }
+          if (mode === 'direct') {
+            if (!conn.username?.trim()) {
+              updateConnection(id, {
+                status: 'error',
+                error: i18n.t('remote.store.usernameRequired'),
+              });
+              set({ connecting: false });
+              return false;
             }
-            if (!mountPoint) {
-              await sleep(500);
-            }
-          }
 
-          if (!mountPoint) {
-            updateConnection(id, {
-              status: 'error',
-              error: i18n.t('remote.store.mountNotDetected', {
-                candidates:
-                  Array.from(candidates).join(', ') || i18n.t('remote.store.mountCandidatesNone'),
-              }),
+            const remoteRoot = await invoke<string>('connect_smb', {
+              connectionId: id,
+              host: conn.host,
+              share: conn.share,
+              username: conn.username,
+              password: conn.password || '',
+              port: conn.port || 445,
             });
-            set({ connecting: false });
-            return false;
+
+            updateConnection(id, {
+              status: 'connected',
+              mountPoint: remoteRoot,
+              lastConnected: new Date().toISOString(),
+              error: undefined,
+            });
+            set({ connecting: false, activeConnectionId: id });
+            return true;
           }
-          
+
+          // system mount mode
+          const result = await invoke<{ mountPoint: string }>('connect_system_smb', {
+            host: conn.host,
+            share: conn.share,
+            username: conn.username || null,
+            password: conn.password || null,
+            timeoutMs: 30000,
+          });
+
           updateConnection(id, {
             status: 'connected',
-            mountPoint,
+            mountPoint: result.mountPoint || getAccessRoot({ ...conn, mode: 'system' }),
             lastConnected: new Date().toISOString(),
             error: undefined,
           });
-          
           set({ connecting: false, activeConnectionId: id });
           return true;
         } catch (err) {
@@ -196,15 +178,24 @@ export const useRemoteStore = create<RemoteState>()(
           return false;
         }
       },
-      
+
       disconnect: async (id) => {
-        const { updateConnection, activeConnectionId } = get();
-        
+        const { updateConnection, activeConnectionId, getConnection } = get();
+        const conn = getConnection(id);
+
+        if (conn?.mode === 'direct') {
+          try {
+            await invoke('disconnect_smb', { connectionId: id });
+          } catch {
+            // ignore
+          }
+        }
+
         updateConnection(id, {
           status: 'disconnected',
           mountPoint: undefined,
         });
-        
+
         if (activeConnectionId === id) {
           set({ activeConnectionId: null });
         }
@@ -213,15 +204,39 @@ export const useRemoteStore = create<RemoteState>()(
     {
       name: 'filetally-remote-connections',
       partialize: (state) => ({
-        // 只持久化连接配置，不保存密码和状态
         connections: state.connections.map((c) => ({
           ...c,
           password: undefined,
           status: 'disconnected' as const,
           error: undefined,
           mountPoint: undefined,
+          mode: c.mode || 'direct',
         })),
       }),
+      merge: (persisted, current) => {
+        const p = persisted as Partial<RemoteState> | undefined;
+        return {
+          ...current,
+          ...p,
+          connections: (p?.connections || []).map((c) => ({
+            ...c,
+            mode: c.mode || 'direct',
+            status: 'disconnected' as const,
+            password: undefined,
+            mountPoint: undefined,
+            error: undefined,
+          })),
+        };
+      },
     }
   )
 );
+
+/** Open mount point in system file manager (system mode only). */
+export async function openConnectionInFinder(conn: RemoteConnection) {
+  const root = useRemoteStore.getState().getAccessRoot(conn);
+  if (root.startsWith('remote://')) {
+    return;
+  }
+  await openPath(root);
+}

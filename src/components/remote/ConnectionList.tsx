@@ -13,8 +13,7 @@ import {
   GlobalOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useRemoteStore, RemoteConnection } from '../../stores';
-import { openUrl } from '@tauri-apps/plugin-opener';
+import { useRemoteStore, RemoteConnection, openConnectionInFinder } from '../../stores/remoteStore';
 
 const { Text } = Typography;
 
@@ -36,30 +35,24 @@ const getStatusIcon = (status: RemoteConnection['status']) => {
   }
 };
 
-const getTypeLabel = (type: RemoteConnection['type']) => {
-  switch (type) {
-    case 'smb':
-      return 'SMB';
-    case 'nfs':
-      return 'NFS';
-    case 'ftp':
-      return 'FTP';
-    default:
-      return type;
-  }
-};
-
 export const ConnectionList: React.FC<ConnectionListProps> = ({
   onEdit,
   onBrowse,
 }) => {
   const { t } = useTranslation();
-  const { connections, removeConnection, connect, disconnect, connecting } = useRemoteStore();
+  const { connections, removeConnection, connect, disconnect, connecting, getAccessRoot } =
+    useRemoteStore();
 
-  const getStatusTag = (status: RemoteConnection['status']) => {
-    switch (status) {
+  const getStatusTag = (conn: RemoteConnection) => {
+    switch (conn.status) {
       case 'connected':
-        return <Tag color="success">{t('remote.connectionList.statusConnected')}</Tag>;
+        return (
+          <Tag color="success">
+            {(conn.mode || 'direct') === 'direct'
+              ? t('remote.connectionList.statusDirectConnected')
+              : t('remote.connectionList.statusConnected')}
+          </Tag>
+        );
       case 'connecting':
         return <Tag color="processing">{t('remote.connectionList.statusConnecting')}</Tag>;
       case 'error':
@@ -89,12 +82,16 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
   };
 
   const handleBrowse = async (conn: RemoteConnection) => {
-    const mountPoint = conn.mountPoint || `/Volumes/${conn.share}`;
+    const root = getAccessRoot(conn);
+    if (root.startsWith('remote://')) {
+      message.info(t('remote.connectionList.directBrowseHint'));
+      onBrowse?.(conn);
+      return;
+    }
     try {
-      await openUrl(`file://${mountPoint}`);
+      await openConnectionInFinder(conn);
     } catch {
-      const smbUrl = `smb://${conn.host}/${conn.share}`;
-      await openUrl(smbUrl);
+      message.error(t('remote.connectionList.openFailed'));
     }
     onBrowse?.(conn);
   };
@@ -131,7 +128,7 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
                 </Text>
               </Space>
             }
-            extra={getStatusTag(conn.status)}
+            extra={getStatusTag(conn)}
             actions={[
               <Tooltip
                 title={
@@ -156,6 +153,7 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
                   size="small"
                   icon={<FolderOpenOutlined />}
                   onClick={() => handleBrowse(conn)}
+                  disabled={conn.status !== 'connected' && (conn.mode || 'direct') === 'direct'}
                 />
               </Tooltip>,
               <Tooltip title={t('remote.connectionList.tooltipEdit')} key="edit">
@@ -191,7 +189,12 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
           >
             <div style={{ marginBottom: 8 }}>
               <Space size="small">
-                <Tag color="blue">{getTypeLabel(conn.type)}</Tag>
+                <Tag color="blue">SMB</Tag>
+                <Tag>
+                  {(conn.mode || 'direct') === 'direct'
+                    ? t('remote.connectionList.modeDirect')
+                    : t('remote.connectionList.modeSystem')}
+                </Tag>
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   <GlobalOutlined /> {conn.host}
                 </Text>
@@ -202,6 +205,13 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
                 <FolderOpenOutlined /> /{conn.share}
               </Text>
             </div>
+            {conn.mountPoint && (
+              <div style={{ marginTop: 4 }}>
+                <Text type="secondary" style={{ fontSize: 11 }} ellipsis>
+                  {conn.mountPoint}
+                </Text>
+              </div>
+            )}
             {conn.lastConnected && (
               <div style={{ marginTop: 8 }}>
                 <Text type="secondary" style={{ fontSize: 11 }}>

@@ -25,6 +25,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
   const { t } = useTranslation();
   const [form] = Form.useForm();
   const { addConnection, updateConnection } = useRemoteStore();
+  const mode = Form.useWatch('mode', form) || editingConnection?.mode || 'direct';
 
   const handleSubmit = async (values: any) => {
     try {
@@ -48,6 +49,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
       layout="vertical"
       initialValues={editingConnection || {
         type: 'smb',
+        mode: 'direct',
         port: 445,
       }}
       onFinish={handleSubmit}
@@ -72,6 +74,20 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
         <Select
           options={[
             { value: 'smb', label: t('remote.connectionForm.typeSmb') },
+          ]}
+        />
+      </Form.Item>
+
+      <Form.Item
+        name="mode"
+        label={t('remote.connectionForm.labelMode')}
+        rules={[{ required: true }]}
+        extra={t('remote.connectionForm.modeHint')}
+      >
+        <Select
+          options={[
+            { value: 'direct', label: t('remote.connectionForm.modeDirect') },
+            { value: 'system', label: t('remote.connectionForm.modeSystem') },
           ]}
         />
       </Form.Item>
@@ -111,10 +127,19 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
       <Form.Item
         name="username"
         label={t('remote.connectionForm.labelUsername')}
+        rules={
+          mode === 'direct'
+            ? [{ required: true, message: t('remote.connectionForm.usernameRequired') }]
+            : undefined
+        }
       >
         <Input
           prefix={<UserOutlined style={{ color: '#8c8c8c' }} />}
-          placeholder={t('remote.connectionForm.usernamePlaceholder')}
+          placeholder={
+            mode === 'direct'
+              ? t('remote.connectionForm.usernameRequiredPlaceholder')
+              : t('remote.connectionForm.usernamePlaceholder')
+          }
         />
       </Form.Item>
 

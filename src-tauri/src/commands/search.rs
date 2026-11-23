@@ -90,6 +90,7 @@ pub struct KeywordCheckResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchOptions {
     pub search_content: bool,
     pub search_filename: bool,      // 是否搜索文件名
@@ -337,14 +338,201 @@ fn search_single_file(
 
 #[tauri::command]
 pub async fn search_files(
+    store: tauri::State<'_, std::sync::Arc<crate::commands::remote::SmbSessionStore>>,
     paths: Vec<String>,
     query: String,
     options: SearchOptions,
     job_id: Option<u64>,
 ) -> Result<SearchResponse, String> {
-    tokio::task::spawn_blocking(move || search_files_sync(paths, query, options, job_id))
+    let mut remote_paths = Vec::new();
+    let mut local_paths = Vec::new();
+    for p in paths {
+        if crate::path_util::is_remote_path(&p) {
+            remote_paths.push(p);
+        } else {
+            local_paths.push(p);
+        }
+    }
+
+    let mut matched = Vec::new();
+    let mut unmatched = Vec::new();
+    let mut total_scanned = 0usize;
+    let mut cancelled = false;
+    let mut truncated = false;
+
+    if !local_paths.is_empty() {
+        let local = tokio::task::spawn_blocking({
+            let query = query.clone();
+            let options = options.clone();
+            move || search_files_sync(local_paths, query, options, job_id)
+        })
         .await
-        .map_err(|e| crate::err::with_detail("analysis_task_failed", e))?
+        .map_err(|e| crate::err::with_detail("analysis_task_failed", e))??;
+        matched.extend(local.matched);
+        unmatched.extend(local.unmatched);
+        total_scanned += local.total_scanned;
+        cancelled |= local.cancelled;
+        truncated |= local.truncated;
+    }
+
+    if !remote_paths.is_empty() {
+        let remote = search_remote_paths(store.as_ref(), remote_paths, &query, &options).await?;
+        matched.extend(remote.matched);
+        unmatched.extend(remote.unmatched);
+        total_scanned += remote.total_scanned;
+        cancelled |= remote.cancelled;
+        truncated |= remote.truncated;
+    }
+
+    if total_scanned == 0 && matched.is_empty() && unmatched.is_empty() {
+        return Err(crate::err::code("search_need_paths"));
+    }
+
+    Ok(SearchResponse {
+        matched,
+        unmatched,
+        total_scanned,
+        cancelled,
+        truncated,
+    })
+}
+
+async fn search_remote_paths(
+    store: &crate::commands::remote::SmbSessionStore,
+    paths: Vec<String>,
+    query: &str,
+    options: &SearchOptions,
+) -> Result<SearchResponse, String> {
+    if query.trim().is_empty() {
+        return Err(crate::err::code("search_need_query"));
+    }
+    if !options.search_content && !options.search_filename {
+        return Err(crate::err::code("search_need_mode"));
+    }
+
+    let mut matched = Vec::new();
+    let mut unmatched = Vec::new();
+    let mut total_scanned = 0usize;
+    let mut truncated = false;
+    const CAP: usize = 50_000;
+
+    for path in &paths {
+        crate::path_util::validate_user_path(path)?;
+        let (conn_id, rel) = crate::path_util::parse_remote_path(path)?;
+
+        // Verify session / root
+        if !crate::commands::remote::remote_path_exists_inner(store, path).await? {
+            return Err(crate::err::with_detail("search_path_missing", path));
+        }
+
+        let mut files = Vec::new();
+        crate::commands::remote::walk_remote_files(store, &conn_id, &rel, &mut files, CAP + 1)
+            .await?;
+        if files.len() > CAP {
+            truncated = true;
+            files.truncate(CAP);
+        }
+
+        for (rpath, _size, is_dir) in files {
+            if is_dir {
+                continue;
+            }
+            total_scanned += 1;
+            let file_name = rpath.rsplit('/').next().unwrap_or(&rpath).to_string();
+            let extension = Path::new(&file_name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            if let Some(ref exts) = options.file_extensions {
+                if !exts.is_empty() {
+                    let ok = exts.iter().any(|e| {
+                        e.trim_start_matches('.')
+                            .eq_ignore_ascii_case(extension.trim_start_matches('.'))
+                    });
+                    if !ok {
+                        continue;
+                    }
+                }
+            }
+
+            let mut matches = Vec::new();
+            let mut was_searched = false;
+
+            if options.search_filename {
+                was_searched = true;
+                if match_filename(&file_name, query, options.case_sensitive) {
+                    matches.push(SearchMatch {
+                        line_number: 0,
+                        content: format!("[filename] {}", file_name),
+                        match_start: 0,
+                        match_end: 0,
+                    });
+                }
+            }
+
+            // Content search for small text-like files only
+            if options.search_content {
+                let text_like = matches!(
+                    extension.to_lowercase().as_str(),
+                    "txt" | "md" | "csv" | "json" | "xml" | "log" | "yml" | "yaml" | "rs" | "ts"
+                        | "tsx" | "js" | "jsx" | "py" | "java" | "go" | "c" | "cpp" | "h" | "hpp"
+                        | "html" | "css" | "sql" | "toml" | "ini" | "conf"
+                );
+                if text_like {
+                    was_searched = true;
+                    if let Ok(bytes) =
+                        crate::commands::remote::read_remote_file_bytes(store, &rpath, 2 * 1024 * 1024)
+                            .await
+                    {
+                        let (decoded, _, _) = encoding_rs::UTF_8.decode(&bytes);
+                        let content = if decoded.contains('\u{FFFD}') {
+                            let (gbk, _, _) = encoding_rs::GBK.decode(&bytes);
+                            gbk.into_owned()
+                        } else {
+                            decoded.into_owned()
+                        };
+                        matches.extend(search_text_content(
+                            &content,
+                            query,
+                            options.case_sensitive,
+                        ));
+                    }
+                }
+            }
+
+            if !was_searched {
+                continue;
+            }
+
+            let file_type = get_file_type(&extension);
+            if matches.is_empty() {
+                unmatched.push(UnmatchedFile {
+                    file_path: rpath,
+                    file_name,
+                    file_type,
+                });
+            } else {
+                let match_count = matches.len();
+                matched.push(SearchResult {
+                    file_path: rpath,
+                    file_name,
+                    file_type,
+                    matches,
+                    match_count,
+                });
+            }
+        }
+    }
+
+    Ok(SearchResponse {
+        matched,
+        unmatched,
+        total_scanned,
+        cancelled: false,
+        truncated,
+    })
 }
 
 fn search_files_sync(

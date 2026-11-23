@@ -344,10 +344,17 @@ pub fn get_home_dir() -> Result<String, String> {
         .ok_or_else(|| crate::err::code("home_dir_missing"))
 }
 
-/// Check if a path exists
+/// Check if a path exists (local FS or in-app SMB `remote://`)
 #[tauri::command]
-pub fn check_path_exists(path: String) -> bool {
-    Path::new(&path).exists()
+pub async fn check_path_exists(
+    store: tauri::State<'_, std::sync::Arc<crate::commands::remote::SmbSessionStore>>,
+    path: String,
+) -> Result<bool, String> {
+    if crate::path_util::is_remote_path(&path) {
+        crate::commands::remote::remote_path_exists(store, path).await
+    } else {
+        Ok(Path::new(&path).exists())
+    }
 }
 
 /// List mounted volumes (for macOS)

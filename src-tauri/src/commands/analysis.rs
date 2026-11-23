@@ -156,13 +156,111 @@ const ANALYSIS_MAX_ENTRIES: u64 = 200_000;
 #[tauri::command]
 pub async fn analyze_folder(
     app: AppHandle,
+    store: tauri::State<'_, std::sync::Arc<crate::commands::remote::SmbSessionStore>>,
     path: String,
     large_file_threshold_mb: u64,
     old_file_days: u64,
 ) -> Result<FolderAnalysisResult, String> {
+    if crate::path_util::is_remote_path(&path) {
+        return analyze_remote_folder(store.as_ref(), path, large_file_threshold_mb).await;
+    }
+
     tokio::task::spawn_blocking(move || analyze_folder_sync(app, path, large_file_threshold_mb, old_file_days))
         .await
         .map_err(|e| crate::err::with_detail("analysis_task_failed", e))?
+}
+
+async fn analyze_remote_folder(
+    store: &crate::commands::remote::SmbSessionStore,
+    path: String,
+    large_file_threshold_mb: u64,
+) -> Result<FolderAnalysisResult, String> {
+    crate::path_util::validate_user_path(&path)?;
+    let (conn_id, rel) = crate::path_util::parse_remote_path(&path)?;
+    if !crate::commands::remote::remote_path_exists_inner(store, &path).await? {
+        return Err(crate::err::with_detail("path_not_found", &path));
+    }
+
+    let mut files = Vec::new();
+    crate::commands::remote::walk_remote_files(
+        store,
+        &conn_id,
+        &rel,
+        &mut files,
+        ANALYSIS_MAX_ENTRIES as usize + 1,
+    )
+    .await?;
+
+    let truncated = files.len() > ANALYSIS_MAX_ENTRIES as usize;
+    if truncated {
+        files.truncate(ANALYSIS_MAX_ENTRIES as usize);
+    }
+
+    let threshold = large_file_threshold_mb.saturating_mul(1024 * 1024);
+    let mut total_files = 0u64;
+    let mut total_dirs = 0u64;
+    let mut total_size = 0u64;
+    let mut type_map: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut large_files = Vec::new();
+
+    for (rpath, size, is_dir) in files {
+        if is_dir {
+            total_dirs += 1;
+            continue;
+        }
+        total_files += 1;
+        total_size += size;
+        let name = rpath.rsplit('/').next().unwrap_or(&rpath).to_string();
+        let ext = Path::new(&name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("(none)")
+            .to_lowercase();
+        let entry = type_map.entry(ext).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += size;
+        if size >= threshold {
+            large_files.push(LargeFile {
+                path: rpath,
+                name,
+                size,
+                size_formatted: format_size(size),
+                modified_time: 0,
+            });
+        }
+    }
+
+    large_files.sort_by(|a, b| b.size.cmp(&a.size));
+    large_files.truncate(50);
+
+    let mut file_type_stats: Vec<FileTypeStats> = type_map
+        .into_iter()
+        .map(|(extension, (count, total_size))| FileTypeStats {
+            extension,
+            count,
+            total_size,
+        })
+        .collect();
+    file_type_stats.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+
+    let analyzed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    Ok(FolderAnalysisResult {
+        path,
+        total_files,
+        total_dirs,
+        total_size,
+        total_size_formatted: format_size(total_size),
+        file_type_stats,
+        large_files,
+        duplicate_groups: Vec::new(),
+        old_files: Vec::new(),
+        analyzed_at,
+        truncated,
+    })
 }
 
 fn analyze_folder_sync(
