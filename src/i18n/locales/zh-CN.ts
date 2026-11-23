@@ -35,7 +35,7 @@ const zhCN = {
     smartSearch: '智能搜索',
     fileTransfer: '文件传输',
     excelCheck: '智能检查',
-    aiAnalysis: 'AI 分析',
+    aiAnalysis: '智能分析',
     settings: '设置',
   },
   app: {
@@ -122,7 +122,7 @@ const zhCN = {
     featureRemote: '远程 NAS/SMB 连接',
     featureTransfer: '本地与远程文件传输',
     featureExcel: 'Excel 比对与完整性检查',
-    featureAI: 'AI 文件夹分析与文档助手',
+    featureAI: '智能文件夹分析与文档助手',
   },
   disk: {
     title: '磁盘监控',
@@ -649,7 +649,7 @@ const zhCN = {
     },
   },
   analysis: {
-    pageTitle: 'AI 分析',
+    pageTitle: '智能分析',
     tabFolder: '文件夹分析',
     tabCleanup: '清理建议',
     tabDocument: '文档助手',
@@ -786,8 +786,8 @@ const zhCN = {
     },
   },
   ai: {
-    title: 'AI 分析',
-    developing: 'AI 分析功能开发中...',
+    title: '智能分析',
+    developing: '智能分析功能开发中...',
     prompts: {
       summarizeSystem:
         '你是一个专业的文档分析助手。请用简洁清晰的语言总结文档内容，包括主要观点、关键信息和结论。',

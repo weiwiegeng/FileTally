@@ -35,7 +35,7 @@ const enUS = {
     smartSearch: 'Smart Search',
     fileTransfer: 'File Transfer',
     excelCheck: 'Smart Check',
-    aiAnalysis: 'AI Analysis',
+    aiAnalysis: 'Smart Analysis',
     settings: 'Settings',
   },
   app: {
@@ -125,7 +125,7 @@ const enUS = {
     featureRemote: 'Remote NAS/SMB connection',
     featureTransfer: 'Local and remote file transfer',
     featureExcel: 'Excel matching and integrity checks',
-    featureAI: 'AI folder analysis and document assistant',
+    featureAI: 'Smart folder analysis and document assistant',
   },
   disk: {
     title: 'Disk Monitor',
@@ -664,7 +664,7 @@ const enUS = {
     },
   },
   analysis: {
-    pageTitle: 'AI Analysis',
+    pageTitle: 'Smart Analysis',
     tabFolder: 'Folder Analysis',
     tabCleanup: 'Cleanup Suggestions',
     tabDocument: 'Document Assistant',
@@ -803,8 +803,8 @@ const enUS = {
     },
   },
   ai: {
-    title: 'AI Analysis',
-    developing: 'AI Analysis is under development...',
+    title: 'Smart Analysis',
+    developing: 'Smart Analysis is under development...',
     prompts: {
       summarizeSystem:
         'You are a professional document analysis assistant. Summarize the document clearly and concisely, covering main points, key information, and conclusions.',
