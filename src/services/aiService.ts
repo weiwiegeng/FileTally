@@ -1,5 +1,6 @@
-import { AIConfig, AIProvider } from '../stores/settingsStore';
+import { AIConfig } from '../stores/settingsStore';
 import i18n from '../i18n';
+import { getProviderProtocol } from './aiProviders';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -57,9 +58,8 @@ export class AIService {
 
   // 发送聊天请求
   async chat(messages: ChatMessage[]): Promise<AIResponse> {
-    switch (this.config.provider) {
+    switch (getProviderProtocol(this.config.provider)) {
       case 'openai':
-      case 'custom':
         return this.chatOpenAI(messages);
       case 'claude':
         return this.chatClaude(messages);
@@ -233,6 +233,38 @@ export class AIService {
       },
     ];
 
+    const response = await this.chat(messages);
+    return response.content;
+  }
+
+  /** Interpret rule-based folder analysis stats (no raw file contents). */
+  async interpretFolderAnalysis(statsJson: string): Promise<string> {
+    const messages: ChatMessage[] = [
+      {
+        role: 'system',
+        content: i18n.t('ai.prompts.folderInterpretSystem'),
+      },
+      {
+        role: 'user',
+        content: i18n.t('ai.prompts.folderInterpretUser', { stats: statsJson }),
+      },
+    ];
+    const response = await this.chat(messages);
+    return response.content;
+  }
+
+  /** Interpret cleanup scan summary. */
+  async interpretCleanupSuggestion(statsJson: string): Promise<string> {
+    const messages: ChatMessage[] = [
+      {
+        role: 'system',
+        content: i18n.t('ai.prompts.cleanupInterpretSystem'),
+      },
+      {
+        role: 'user',
+        content: i18n.t('ai.prompts.cleanupInterpretUser', { stats: statsJson }),
+      },
+    ];
     const response = await this.chat(messages);
     return response.content;
   }

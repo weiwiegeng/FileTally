@@ -31,11 +31,13 @@ import {
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { useAnalysisStore, useRemoteStore, FolderAnalysisResult } from '../../stores';
+import { useAnalysisStore, useRemoteStore, useSettingsStore, FolderAnalysisResult } from '../../stores';
 import { useThemeColors } from '../../hooks';
 import { useTranslation } from 'react-i18next';
 import { RemoteFolderSelector } from '../search/RemoteFolderSelector';
 import { isRemotePath, getPathName } from '../../utils/format';
+import { getAIService } from '../../services/aiService';
+import { AiInsightCard } from './AiInsightCard';
 
 const { Text, Title } = Typography;
 
@@ -58,10 +60,16 @@ export const FolderAnalysisTab: React.FC = () => {
     clearFolderAnalysis,
   } = useAnalysisStore();
   const { connections } = useRemoteStore();
+  const { settings } = useSettingsStore();
   const colors = useThemeColors();
   const { t } = useTranslation();
   const [showRemoteSelector, setShowRemoteSelector] = useState(false);
   const [progress, setProgress] = useState<AnalysisProgress | null>(null);
+  const [aiInsight, setAiInsight] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
+  const isAIConfigured = Boolean(
+    settings.aiConfig.apiKey || settings.aiConfig.provider === 'ollama'
+  );
 
   // 监听分析进度事件
   useEffect(() => {
@@ -107,6 +115,7 @@ export const FolderAnalysisTab: React.FC = () => {
     if (!folderAnalysisPath) return;
     
     setProgress(null);
+    setAiInsight('');
     analyzeFolderStart();
     try {
       const result = await invoke<FolderAnalysisResult>('analyze_folder', {
@@ -124,6 +133,62 @@ export const FolderAnalysisTab: React.FC = () => {
       analyzeFolderError();
       setProgress(null);
       message.error(t('analysis.folder.analyzeFailed', { error: mapBackendError(err) }));
+    }
+  };
+
+  const buildFolderStatsPayload = (result: FolderAnalysisResult) => {
+    const reclaimableFromDupes = result.duplicateGroups.reduce(
+      (sum, g) => sum + g.size * Math.max(0, g.files.length - 1),
+      0
+    );
+    return {
+      path: result.path,
+      totalSize: result.totalSizeFormatted,
+      totalFiles: result.totalFiles,
+      totalDirs: result.totalDirs,
+      truncated: Boolean(result.truncated),
+      topFileTypes: result.fileTypeStats.slice(0, 8).map((s) => ({
+        extension: s.extension,
+        count: s.count,
+        totalSize: s.totalSize,
+      })),
+      largeFiles: result.largeFiles.slice(0, 8).map((f) => ({
+        name: f.name,
+        size: f.sizeFormatted,
+      })),
+      duplicateGroups: result.duplicateGroups.slice(0, 8).map((g) => ({
+        copies: g.files.length,
+        size: g.sizeFormatted,
+        samplePaths: g.files.slice(0, 3),
+      })),
+      estimatedDuplicateWasteBytes: reclaimableFromDupes,
+      oldFiles: result.oldFiles.slice(0, 8).map((f) => ({
+        name: f.name,
+        size: f.sizeFormatted,
+        daysUnmodified: f.lastModifiedDays ?? f.lastAccessedDays ?? 0,
+      })),
+    };
+  };
+
+  const handleAiInsight = async () => {
+    if (!folderAnalysis) return;
+    if (!isAIConfigured) {
+      message.error(t('analysis.folder.aiInsightNeedConfig'));
+      return;
+    }
+    setAiLoading(true);
+    try {
+      const ai = getAIService(settings.aiConfig);
+      const text = await ai.interpretFolderAnalysis(
+        JSON.stringify(buildFolderStatsPayload(folderAnalysis), null, 2)
+      );
+      setAiInsight(text);
+    } catch (err) {
+      message.error(
+        t('analysis.folder.aiInsightFailed', { error: mapBackendError(err) })
+      );
+    } finally {
+      setAiLoading(false);
     }
   };
 
@@ -298,7 +363,12 @@ export const FolderAnalysisTab: React.FC = () => {
         </Button>
         
         {folderAnalysis && (
-          <Button onClick={clearFolderAnalysis}>
+          <Button
+            onClick={() => {
+              setAiInsight('');
+              clearFolderAnalysis();
+            }}
+          >
             {t('analysis.folder.clearResults')}
           </Button>
         )}
@@ -382,6 +452,14 @@ export const FolderAnalysisTab: React.FC = () => {
               </Card>
             </Col>
           </Row>
+
+          <AiInsightCard
+            i18nPrefix="analysis.folder"
+            isConfigured={isAIConfigured}
+            loading={aiLoading}
+            insight={aiInsight}
+            onGenerate={handleAiInsight}
+          />
 
           {/* 详细分析表格 */}
           <Row gutter={16}>

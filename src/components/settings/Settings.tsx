@@ -16,6 +16,7 @@ import {
   Tag,
   Input,
   Slider,
+  AutoComplete,
 } from 'antd';
 import {
   SettingOutlined,
@@ -31,8 +32,15 @@ import {
   LoadingOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useSettingsStore, AIProvider } from '../../stores';
+import { useSettingsStore, AIProvider, AICapability } from '../../stores';
 import { useThemeColors } from '../../hooks';
+import {
+  AI_PROVIDER_PRESETS,
+  getDefaultEndpoint,
+  getModelOptions,
+  getProviderProtocol,
+  inferCapability,
+} from '../../services/aiProviders';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -48,67 +56,43 @@ export const Settings: React.FC = () => {
     message.success(t('settings.resetSuccess'));
   };
 
-  // AI 模型选项
-  const getModelOptions = (provider: AIProvider) => {
-    switch (provider) {
-      case 'openai':
-        return [
-          { value: 'gpt-4o', label: 'GPT-4o' },
-          { value: 'gpt-4o-mini', label: 'GPT-4o Mini' },
-          { value: 'gpt-4-turbo', label: 'GPT-4 Turbo' },
-          { value: 'gpt-3.5-turbo', label: 'GPT-3.5 Turbo' },
-        ];
-      case 'claude':
-        return [
-          { value: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet' },
-          { value: 'claude-3-opus-20240229', label: 'Claude 3 Opus' },
-          { value: 'claude-3-haiku-20240307', label: 'Claude 3 Haiku' },
-        ];
-      case 'ollama':
-        return [
-          { value: 'llama3.2', label: 'Llama 3.2' },
-          { value: 'qwen2.5', label: 'Qwen 2.5' },
-          { value: 'mistral', label: 'Mistral' },
-          { value: 'deepseek-coder', label: 'DeepSeek Coder' },
-        ];
-      default:
-        return [];
-    }
-  };
-
-  // 获取默认 API 端点
-  const getDefaultEndpoint = (provider: AIProvider) => {
-    switch (provider) {
-      case 'openai':
-        return 'https://api.openai.com/v1';
-      case 'claude':
-        return 'https://api.anthropic.com';
-      case 'ollama':
-        return 'http://localhost:11434';
-      default:
-        return '';
-    }
-  };
+  const providerOptions = AI_PROVIDER_PRESETS.map((p) => ({
+    value: p.id,
+    label: p.labelKey ? t(p.labelKey) : p.label || p.id,
+  }));
 
   // 切换提供商时更新默认配置
   const handleProviderChange = (provider: AIProvider) => {
     const models = getModelOptions(provider);
+    const model = models[0]?.value || settings.aiConfig.model || '';
     updateSettings({
       aiConfig: {
         ...settings.aiConfig,
         provider,
         apiEndpoint: getDefaultEndpoint(provider),
-        model: models[0]?.value || '',
+        model,
+        capability: inferCapability(provider, model),
       },
     });
     setConnectionStatus('idle');
   };
 
+  const handleModelChange = (model: string) => {
+    updateSettings({
+      aiConfig: {
+        ...settings.aiConfig,
+        model,
+        capability: inferCapability(settings.aiConfig.provider, model, settings.aiConfig.capability),
+      },
+    });
+  };
+
   // 测试连接
   const testConnection = async () => {
     const { aiConfig } = settings;
+    const protocol = getProviderProtocol(aiConfig.provider);
     
-    if (!aiConfig.apiKey && aiConfig.provider !== 'ollama') {
+    if (!aiConfig.apiKey && protocol !== 'ollama') {
       message.error(t('settings.apiKeyRequired'));
       return;
     }
@@ -119,11 +103,9 @@ export const Settings: React.FC = () => {
     try {
       let response: Response;
       
-      if (aiConfig.provider === 'ollama') {
-        // Ollama 测试
+      if (protocol === 'ollama') {
         response = await fetch(`${aiConfig.apiEndpoint}/api/tags`);
-      } else if (aiConfig.provider === 'claude') {
-        // Claude 测试
+      } else if (protocol === 'claude') {
         response = await fetch(`${aiConfig.apiEndpoint}/v1/messages`, {
           method: 'POST',
           headers: {
@@ -138,11 +120,19 @@ export const Settings: React.FC = () => {
           }),
         });
       } else {
-        // OpenAI 兼容测试
-        response = await fetch(`${aiConfig.apiEndpoint}/models`, {
+        // OpenAI-compatible: prefer a tiny chat call (some CN APIs lack /models)
+        const endpoint = aiConfig.apiEndpoint.replace(/\/$/, '');
+        response = await fetch(`${endpoint}/chat/completions`, {
+          method: 'POST',
           headers: {
-            'Authorization': `Bearer ${aiConfig.apiKey}`,
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${aiConfig.apiKey}`,
           },
+          body: JSON.stringify({
+            model: aiConfig.model,
+            messages: [{ role: 'user', content: 'ping' }],
+            max_tokens: 5,
+          }),
         });
       }
 
@@ -470,16 +460,13 @@ export const Settings: React.FC = () => {
                       <Select
                         value={settings.aiConfig.provider}
                         onChange={handleProviderChange}
-                        options={[
-                          { value: 'openai', label: 'OpenAI' },
-                          { value: 'claude', label: 'Claude (Anthropic)' },
-                          { value: 'ollama', label: t('settings.providerOllamaLocal') },
-                          { value: 'custom', label: t('settings.providerCustom') },
-                        ]}
+                        options={providerOptions}
+                        showSearch
+                        optionFilterProp="label"
                       />
                     </Form.Item>
 
-                    {settings.aiConfig.provider !== 'ollama' && (
+                    {getProviderProtocol(settings.aiConfig.provider) !== 'ollama' && (
                       <Form.Item label={t('settings.apiKeyLabel')}>
                         <Input.Password
                           value={settings.aiConfig.apiKey}
@@ -491,7 +478,10 @@ export const Settings: React.FC = () => {
                       </Form.Item>
                     )}
 
-                    <Form.Item label={t('settings.apiEndpoint')}>
+                    <Form.Item
+                      label={t('settings.apiEndpoint')}
+                      extra={t('settings.apiEndpointHint')}
+                    >
                       <Input
                         value={settings.aiConfig.apiEndpoint}
                         onChange={(e) => updateSettings({
@@ -501,24 +491,52 @@ export const Settings: React.FC = () => {
                       />
                     </Form.Item>
 
-                    <Form.Item label={t('settings.model')}>
-                      {settings.aiConfig.provider === 'custom' ? (
-                        <Input
-                          value={settings.aiConfig.model}
-                          onChange={(e) => updateSettings({
-                            aiConfig: { ...settings.aiConfig, model: e.target.value }
-                          })}
-                          placeholder={t('settings.modelPlaceholder')}
-                        />
-                      ) : (
-                        <Select
-                          value={settings.aiConfig.model}
-                          onChange={(value) => updateSettings({
-                            aiConfig: { ...settings.aiConfig, model: value }
-                          })}
-                          options={getModelOptions(settings.aiConfig.provider)}
-                        />
-                      )}
+                    <Form.Item
+                      label={t('settings.model')}
+                      extra={t('settings.modelHint')}
+                    >
+                      <AutoComplete
+                        value={settings.aiConfig.model}
+                        options={getModelOptions(settings.aiConfig.provider).map((m) => ({
+                          value: m.value,
+                          label: (
+                            <Space>
+                              <span>{m.label}</span>
+                              {m.capability && m.capability !== 'text' && (
+                                <Tag color="purple" style={{ marginInlineEnd: 0 }}>
+                                  {t(`settings.capability.${m.capability}`)}
+                                </Tag>
+                              )}
+                            </Space>
+                          ),
+                        }))}
+                        onChange={handleModelChange}
+                        placeholder={t('settings.modelPlaceholder')}
+                        filterOption={(input, option) =>
+                          String(option?.value || '')
+                            .toLowerCase()
+                            .includes(input.toLowerCase())
+                        }
+                      />
+                    </Form.Item>
+
+                    <Form.Item
+                      label={t('settings.capabilityLabel')}
+                      extra={t('settings.capabilityHint')}
+                    >
+                      <Select<AICapability>
+                        value={settings.aiConfig.capability || 'text'}
+                        onChange={(capability) =>
+                          updateSettings({
+                            aiConfig: { ...settings.aiConfig, capability },
+                          })
+                        }
+                        options={[
+                          { value: 'text', label: t('settings.capability.text') },
+                          { value: 'vision', label: t('settings.capability.vision') },
+                          { value: 'multimodal', label: t('settings.capability.multimodal') },
+                        ]}
+                      />
                     </Form.Item>
                   </Form>
                 </Col>
@@ -565,7 +583,7 @@ export const Settings: React.FC = () => {
                         {t('settings.testConnection')}
                       </Button>
                       <Text type="secondary" style={{ marginLeft: 12, fontSize: 12 }}>
-                        {settings.aiConfig.provider === 'ollama'
+                        {getProviderProtocol(settings.aiConfig.provider) === 'ollama'
                           ? t('settings.testHintOllama')
                           : t('settings.testHintApi')}
                       </Text>

@@ -1,9 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Button,
   Space,
   Typography,
-  Table,
   Card,
   Statistic,
   Row,
@@ -13,7 +12,6 @@ import {
   Tooltip,
   Tag,
   List,
-  Collapse,
   message,
 } from 'antd';
 import { mapBackendError } from '../../utils/backendError';
@@ -28,11 +26,13 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
-import { useAnalysisStore, CleanupSuggestion, CleanupItem } from '../../stores';
+import { useAnalysisStore, useSettingsStore, CleanupSuggestion, CleanupItem } from '../../stores';
 import { useThemeColors } from '../../hooks';
 import { useTranslation } from 'react-i18next';
+import { getAIService } from '../../services/aiService';
+import { AiInsightCard } from './AiInsightCard';
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 
 export const CleanupSuggestionTab: React.FC = () => {
   const {
@@ -43,10 +43,17 @@ export const CleanupSuggestionTab: React.FC = () => {
     scanCleanupError,
     clearCleanupSuggestion,
   } = useAnalysisStore();
+  const { settings } = useSettingsStore();
   const colors = useThemeColors();
   const { t } = useTranslation();
+  const [aiInsight, setAiInsight] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
+  const isAIConfigured = Boolean(
+    settings.aiConfig.apiKey || settings.aiConfig.provider === 'ollama'
+  );
 
   const handleScan = async () => {
+    setAiInsight('');
     scanCleanupStart();
     try {
       const result = await invoke<CleanupSuggestion>('scan_cleanup_suggestions');
@@ -55,6 +62,64 @@ export const CleanupSuggestionTab: React.FC = () => {
       console.error('cleanup scan failed:', err);
       scanCleanupError();
       message.error(t('analysis.cleanup.scanFailed', { error: mapBackendError(err) }));
+    }
+  };
+
+  const buildCleanupPayload = (result: CleanupSuggestion) => ({
+    totalCleanableSize: result.totalCleanableSizeFormatted,
+    cache: {
+      count: result.cacheFiles.length,
+      items: result.cacheFiles.slice(0, 8).map((i) => ({
+        name: i.name,
+        size: i.sizeFormatted,
+        description: i.description,
+      })),
+    },
+    temp: {
+      count: result.tempFiles.length,
+      items: result.tempFiles.slice(0, 8).map((i) => ({
+        name: i.name,
+        size: i.sizeFormatted,
+        description: i.description,
+      })),
+    },
+    downloads: {
+      count: result.downloadFiles.length,
+      items: result.downloadFiles.slice(0, 8).map((i) => ({
+        name: i.name,
+        size: i.sizeFormatted,
+        description: i.description,
+      })),
+    },
+    logs: {
+      count: result.logFiles.length,
+      items: result.logFiles.slice(0, 8).map((i) => ({
+        name: i.name,
+        size: i.sizeFormatted,
+        description: i.description,
+      })),
+    },
+  });
+
+  const handleAiInsight = async () => {
+    if (!cleanupSuggestion) return;
+    if (!isAIConfigured) {
+      message.error(t('analysis.cleanup.aiInsightNeedConfig'));
+      return;
+    }
+    setAiLoading(true);
+    try {
+      const ai = getAIService(settings.aiConfig);
+      const text = await ai.interpretCleanupSuggestion(
+        JSON.stringify(buildCleanupPayload(cleanupSuggestion), null, 2)
+      );
+      setAiInsight(text);
+    } catch (err) {
+      message.error(
+        t('analysis.cleanup.aiInsightFailed', { error: mapBackendError(err) })
+      );
+    } finally {
+      setAiLoading(false);
     }
   };
 
@@ -177,7 +242,12 @@ export const CleanupSuggestionTab: React.FC = () => {
             <Button icon={<ReloadOutlined />} onClick={handleScan}>
               {t('analysis.cleanup.rescan')}
             </Button>
-            <Button onClick={clearCleanupSuggestion}>
+            <Button
+              onClick={() => {
+                setAiInsight('');
+                clearCleanupSuggestion();
+              }}
+            >
               {t('analysis.cleanup.clearResults')}
             </Button>
           </>
@@ -263,6 +333,14 @@ export const CleanupSuggestionTab: React.FC = () => {
               {t('analysis.cleanup.warning')}
             </Text>
           </Card>
+
+          <AiInsightCard
+            i18nPrefix="analysis.cleanup"
+            isConfigured={isAIConfigured}
+            loading={aiLoading}
+            insight={aiInsight}
+            onGenerate={handleAiInsight}
+          />
 
           {/* 分类列表 */}
           <Row gutter={16}>

@@ -4,7 +4,19 @@ import { SortField, SortOrder } from '../types';
 import { normalizeSortField } from '../utils/sortFiles';
 
 // AI 模型提供商类型
-export type AIProvider = 'openai' | 'claude' | 'ollama' | 'custom';
+export type AIProvider =
+  | 'openai'
+  | 'claude'
+  | 'ollama'
+  | 'custom'
+  | 'deepseek'
+  | 'zhipu'
+  | 'qwen'
+  | 'kimi'
+  | 'hunyuan';
+
+/** What the selected model is expected to handle. */
+export type AICapability = 'text' | 'vision' | 'multimodal';
 
 // AI 配置
 export interface AIConfig {
@@ -14,6 +26,8 @@ export interface AIConfig {
   model: string;
   maxTokens: number;
   temperature: number;
+  /** text = chat only; vision/multimodal = may accept images later */
+  capability: AICapability;
 }
 
 export type DefaultPage = 'disk' | 'browser' | 'filter' | 'remote' | 'transfer' | 'excel' | 'ai' | 'settings';
@@ -86,6 +100,7 @@ const defaultSettings: AppSettings = {
     model: 'gpt-4o-mini',
     maxTokens: 4096,
     temperature: 0.7,
+    capability: 'multimodal',
   },
 };
 
@@ -130,6 +145,9 @@ export const useSettingsStore = create<SettingsState>()(
             aiConfig: {
               ...defaultSettings.aiConfig,
               ...raw.aiConfig,
+              capability:
+                raw.aiConfig?.capability ||
+                defaultSettings.aiConfig.capability,
             },
           },
         };
