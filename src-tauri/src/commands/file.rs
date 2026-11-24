@@ -135,8 +135,14 @@ fn get_mime_type(extension: &str) -> String {
 
 /// Scan a directory and return first-level children (lazy loading)
 #[tauri::command]
-pub fn scan_directory(path: String) -> Result<Vec<FileNode>, String> {
+pub async fn scan_directory(path: String) -> Result<Vec<FileNode>, String> {
     crate::path_util::validate_user_path(&path)?;
+    tokio::task::spawn_blocking(move || scan_directory_sync(path))
+        .await
+        .map_err(|e| crate::err::with_detail("task_join_failed", e))?
+}
+
+fn scan_directory_sync(path: String) -> Result<Vec<FileNode>, String> {
     let dir_path = Path::new(&path);
     
     if !dir_path.exists() {
@@ -193,14 +199,9 @@ pub fn scan_directory(path: String) -> Result<Vec<FileNode>, String> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        // Count children for directories
-        let children_count = if is_dir {
-            fs::read_dir(&entry_path)
-                .map(|entries| entries.count())
-                .ok()
-        } else {
-            None
-        };
+        // Skip children_count: an extra read_dir per folder doubles NAS/UNC RTT.
+        // UI tree is lazy-loaded; count is optional chrome, not required for expand.
+        let children_count = None;
 
         let node = FileNode {
             id: generate_id(&entry_path),
@@ -234,8 +235,14 @@ pub fn scan_directory(path: String) -> Result<Vec<FileNode>, String> {
 
 /// Get file preview information
 #[tauri::command]
-pub fn get_file_preview(path: String) -> Result<FilePreviewInfo, String> {
+pub async fn get_file_preview(path: String) -> Result<FilePreviewInfo, String> {
     crate::path_util::validate_user_path(&path)?;
+    tokio::task::spawn_blocking(move || get_file_preview_sync(path))
+        .await
+        .map_err(|e| crate::err::with_detail("task_join_failed", e))?
+}
+
+fn get_file_preview_sync(path: String) -> Result<FilePreviewInfo, String> {
     let file_path = Path::new(&path);
     
     if !file_path.exists() {
@@ -314,8 +321,8 @@ pub fn get_file_preview(path: String) -> Result<FilePreviewInfo, String> {
     let content = if preview_type == "text" && metadata.len() < 1024 * 1024 {
         // Only read text files smaller than 1MB
         fs::read_to_string(&file_path).ok()
-    } else if preview_type == "pdf" && metadata.len() < 50 * 1024 * 1024 {
-        // Extract PDF text for files smaller than 50MB
+    } else if preview_type == "pdf" && metadata.len() < 15 * 1024 * 1024 {
+        // Cap PDF text extract — heavy files should open in dedicated preview, not metadata IPC
         extract_pdf_text_safe(&file_path)
     } else {
         None

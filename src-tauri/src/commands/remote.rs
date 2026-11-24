@@ -16,7 +16,7 @@ use crate::path_util::{self, join_remote_path, parse_remote_path};
 
 /// In-memory SMB sessions keyed by frontend connection id.
 pub struct SmbSessionStore {
-    inner: Mutex<HashMap<String, SmbSession>>,
+    pub(crate) inner: Mutex<HashMap<String, SmbSession>>,
 }
 
 impl Default for SmbSessionStore {
@@ -27,10 +27,10 @@ impl Default for SmbSessionStore {
     }
 }
 
-struct SmbSession {
-    client: SmbClient,
-    share: smb2::Tree,
-    share_name: String,
+pub(crate) struct SmbSession {
+    pub(crate) client: SmbClient,
+    pub(crate) share: smb2::Tree,
+    pub(crate) share_name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,7 +65,7 @@ fn format_size(size: u64) -> String {
     }
 }
 
-fn map_smb_err(e: impl std::fmt::Display) -> String {
+pub(crate) fn map_smb_err(e: impl std::fmt::Display) -> String {
     let msg = e.to_string();
     let lower = msg.to_lowercase();
     if lower.contains("auth")
@@ -314,13 +314,12 @@ pub async fn disconnect_smb(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn list_remote_dir(
-    store: State<'_, Arc<SmbSessionStore>>,
-    path: String,
+pub async fn list_remote_dir_inner(
+    store: &SmbSessionStore,
+    path: &str,
 ) -> Result<Vec<RemoteDirEntry>, String> {
-    path_util::validate_user_path(&path)?;
-    let (conn_id, rel) = parse_remote_path(&path)?;
+    path_util::validate_user_path(path)?;
+    let (conn_id, rel) = parse_remote_path(path)?;
 
     let mut guard = store.inner.lock().await;
     let session = guard
@@ -334,6 +333,14 @@ pub async fn list_remote_dir(
         .map_err(map_smb_err)?;
 
     Ok(entries_to_remote(&conn_id, &rel, &entries))
+}
+
+#[tauri::command]
+pub async fn list_remote_dir(
+    store: State<'_, Arc<SmbSessionStore>>,
+    path: String,
+) -> Result<Vec<RemoteDirEntry>, String> {
+    list_remote_dir_inner(store.as_ref(), &path).await
 }
 
 fn entries_to_remote(conn_id: &str, parent_rel: &str, entries: &[DirectoryEntry]) -> Vec<RemoteDirEntry> {

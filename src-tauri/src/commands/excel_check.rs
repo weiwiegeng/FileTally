@@ -1,10 +1,29 @@
-use calamine::{Reader, Xlsx, open_workbook, Data};
-use rust_xlsxwriter::{Workbook, Format, Color, FormatBorder};
+use aho_corasick::AhoCorasick;
+use calamine::{open_workbook, Data, Reader, Xlsx};
+use rayon::prelude::*;
+use rust_xlsxwriter::{Color, Format, FormatBorder, Workbook};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
-use walkdir::WalkDir;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::Arc;
+use tauri::{AppHandle, State};
+
+use super::excel_remote::{
+    collect_remote_contents, collect_remote_names, list_remote_person_folders,
+    scan_remote_folder_tree_shallow,
+};
+use super::excel_runtime::{
+    check_concurrency, clear_cancel, collect_contents_under_cached, collect_names_under_cached,
+    emit_progress, is_cancelled, list_person_folders, resolve_job_id,
+};
+use super::remote::SmbSessionStore;
+
+const INTEGRITY_PERSON_FOLDER_SOFT_CAP: usize = 500_000;
+const INTEGRITY_ROW_SOFT_CAP: usize = 500_000;
+const TREE_ENTRY_SOFT_CAP: usize = 500_000;
 
 /// Excel 列信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +64,7 @@ pub struct ExcelMatchResult {
     pub items: Vec<MatchResultItem>,
     pub output_path: Option<String>,
     pub truncated: bool,
+    pub cancelled: bool,
 }
 
 /// 完整性检查项
@@ -78,6 +98,7 @@ pub struct BatchIntegrityResult {
     pub results: Vec<FolderIntegrityResult>,
     pub output_path: Option<String>,
     pub truncated: bool,
+    pub cancelled: bool,
 }
 
 /// 文件树节点
@@ -100,312 +121,6 @@ pub struct FolderTreeResult {
     pub truncated: bool,
 }
 
-/// 列索引转字母
-fn column_index_to_letter(index: usize) -> String {
-    let mut result = String::new();
-    let mut n = index;
-    loop {
-        result.insert(0, (b'A' + (n % 26) as u8) as char);
-        if n < 26 {
-            break;
-        }
-        n = n / 26 - 1;
-    }
-    result
-}
-
-/// 读取 Excel 文件信息
-#[tauri::command]
-pub async fn read_excel_info(file_path: String, sheet_index: Option<usize>) -> Result<ExcelFileInfo, String> {
-    crate::path_util::validate_user_path(&file_path)?;
-    let path = Path::new(&file_path);
-    if !path.exists() {
-        return Err(crate::err::code("file_not_found"));
-    }
-
-    let mut workbook: Xlsx<_> = open_workbook(&file_path)
-        .map_err(|e| crate::err::with_detail("excel_open_failed", e))?;
-
-    let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
-    
-    if sheet_names.is_empty() {
-        return Err(crate::err::code("excel_no_sheets"));
-    }
-
-    let sheet_idx = sheet_index.unwrap_or(0);
-    let sheet_name = sheet_names.get(sheet_idx)
-        .ok_or_else(|| crate::err::code("excel_sheet_index_invalid"))?
-        .clone();
-
-    let range = workbook.worksheet_range(&sheet_name)
-        .map_err(|e| crate::err::with_detail("excel_sheet_read_failed", e))?;
-
-    let mut columns: Vec<ExcelColumnInfo> = Vec::new();
-    let row_count = range.height();
-
-    // 获取第一行作为列名
-    if let Some(first_row) = range.rows().next() {
-        for (idx, cell) in first_row.iter().enumerate() {
-            let name = match cell {
-                Data::String(s) => s.clone(),
-                Data::Int(i) => i.to_string(),
-                Data::Float(f) => f.to_string(),
-                _ => format!("Column{}", idx + 1),
-            };
-
-            // 获取样本值 (最多5个)
-            let mut sample_values: Vec<String> = Vec::new();
-            for (row_idx, row) in range.rows().enumerate() {
-                if row_idx == 0 {
-                    continue; // 跳过标题行
-                }
-                if sample_values.len() >= 5 {
-                    break;
-                }
-                if let Some(cell) = row.get(idx) {
-                    let value = match cell {
-                        Data::String(s) => s.clone(),
-                        Data::Int(i) => i.to_string(),
-                        Data::Float(f) => f.to_string(),
-                        _ => String::new(),
-                    };
-                    if !value.is_empty() {
-                        sample_values.push(value);
-                    }
-                }
-            }
-
-            columns.push(ExcelColumnInfo {
-                index: idx,
-                name,
-                letter: column_index_to_letter(idx),
-                sample_values,
-            });
-        }
-    }
-
-    Ok(ExcelFileInfo {
-        sheets: sheet_names,
-        columns,
-        row_count: if row_count > 0 { row_count - 1 } else { 0 }, // 减去标题行
-    })
-}
-
-/// Excel 比对 - 与文件夹匹配
-#[tauri::command]
-pub async fn match_excel_with_folder(
-    excel_path: String,
-    sheet_index: usize,
-    column_index: usize,
-    folder_path: String,
-    match_mode: String, // "exact" | "contains" | "starts_with"
-    mark_color: String, // "red" | "yellow" | "green"
-    output_path: Option<String>,
-) -> Result<ExcelMatchResult, String> {
-    crate::path_util::validate_user_path(&excel_path)?;
-    crate::path_util::validate_user_path(&folder_path)?;
-    if let Some(ref out) = output_path {
-        crate::path_util::validate_user_path(out)?;
-    }
-    // 读取 Excel
-    let mut workbook: Xlsx<_> = open_workbook(&excel_path)
-        .map_err(|e| crate::err::with_detail("excel_open_failed", e))?;
-
-    let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
-    let sheet_name = sheet_names.get(sheet_index)
-        .ok_or_else(|| crate::err::code("excel_sheet_index_invalid"))?
-        .clone();
-
-    let range = workbook.worksheet_range(&sheet_name)
-        .map_err(|e| crate::err::with_detail("excel_sheet_read_failed", e))?;
-
-    // 收集文件夹中的文件名
-    let mut file_names: HashSet<String> = HashSet::new();
-    let mut truncated = false;
-    let folder = Path::new(&folder_path);
-    
-    if folder.exists() {
-        // 递归遍历（限深/限量，避免超大目录 OOM）
-        let mut count = 0usize;
-        for entry in WalkDir::new(&folder_path)
-            .follow_links(false)
-            .max_depth(16)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if entry.path() == folder {
-                continue;
-            }
-            count += 1;
-            if count > 200_000 {
-                truncated = true;
-                break;
-            }
-            if let Some(name) = entry.path().file_name() {
-                let name_str = name.to_string_lossy().to_string();
-                file_names.insert(name_str);
-                if let Some(stem) = entry.path().file_stem() {
-                    file_names.insert(stem.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
-
-    // 执行匹配
-    let mut items: Vec<MatchResultItem> = Vec::new();
-    let mut matched_count = 0;
-    let mut total_rows = 0;
-
-    for (row_idx, row) in range.rows().enumerate() {
-        if row_idx == 0 {
-            continue; // 跳过标题行
-        }
-        total_rows += 1;
-
-        let value = row.get(column_index)
-            .map(|cell| match cell {
-                Data::String(s) => s.clone(),
-                Data::Int(i) => i.to_string(),
-                Data::Float(f) => f.to_string(),
-                _ => String::new(),
-            })
-            .unwrap_or_default();
-
-        if value.is_empty() {
-            items.push(MatchResultItem {
-                row_index: row_idx,
-                value: value.clone(),
-                matched: false,
-                matched_file: None,
-            });
-            continue;
-        }
-
-        // 根据匹配模式检查
-        let mut matched = false;
-        let mut matched_file: Option<String> = None;
-
-        for file_name in &file_names {
-            let is_match = match match_mode.as_str() {
-                "exact" => {
-                    file_name == &value
-                        || Path::new(file_name)
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .map(|stem| stem == value)
-                            .unwrap_or(false)
-                }
-                "contains" => file_name.contains(&value),
-                "starts_with" => file_name.starts_with(&value),
-                _ => file_name.contains(&value),
-            };
-
-            if is_match {
-                matched = true;
-                matched_file = Some(file_name.clone());
-                break;
-            }
-        }
-
-        if matched {
-            matched_count += 1;
-        }
-
-        items.push(MatchResultItem {
-            row_index: row_idx,
-            value,
-            matched,
-            matched_file,
-        });
-    }
-
-    let missing_count = total_rows - matched_count;
-
-    // 如果指定了输出路径，生成带颜色标注的 Excel
-    let final_output_path = if let Some(out_path) = output_path {
-        // 创建新的 Excel 工作簿
-        let mut new_workbook = Workbook::new();
-        let worksheet = new_workbook.add_worksheet();
-
-        // 设置标注颜色格式
-        let mark_format = Format::new()
-            .set_background_color(match mark_color.as_str() {
-                "red" => Color::RGB(0xFF6B6B),
-                "yellow" => Color::RGB(0xFFE66D),
-                "green" => Color::RGB(0x6BCB77),
-                _ => Color::RGB(0xFF6B6B),
-            });
-
-        let normal_format = Format::new();
-        let header_format = Format::new()
-            .set_bold()
-            .set_background_color(Color::RGB(0xE8E8E8))
-            .set_border(FormatBorder::Thin);
-
-        // 写入数据
-        for (row_idx, row) in range.rows().enumerate() {
-            let is_header = row_idx == 0;
-            let is_missing = if row_idx > 0 {
-                items.get(row_idx - 1).map(|item| !item.matched).unwrap_or(false)
-            } else {
-                false
-            };
-
-            for (col_idx, cell) in row.iter().enumerate() {
-                let value = match cell {
-                    Data::String(s) => s.clone(),
-                    Data::Int(i) => i.to_string(),
-                    Data::Float(f) => f.to_string(),
-                    Data::Bool(b) => b.to_string(),
-                    _ => String::new(),
-                };
-
-                let format = if is_header {
-                    &header_format
-                } else if is_missing {
-                    &mark_format
-                } else {
-                    &normal_format
-                };
-
-                worksheet.write_string_with_format(row_idx as u32, col_idx as u16, &value, format)
-                    .map_err(|e| crate::err::with_detail("excel_write_cell_failed", e))?;
-            }
-
-            // 添加匹配状态列
-            if is_header {
-                worksheet.write_string_with_format(row_idx as u32, range.width() as u16, "Match Status", &header_format)
-                    .map_err(|e| crate::err::with_detail("excel_write_cell_failed", e))?;
-            } else if row_idx > 0 {
-                let status = if items.get(row_idx - 1).map(|item| item.matched).unwrap_or(false) {
-                    "Matched"
-                } else {
-                    "Missing"
-                };
-                let format = if is_missing { &mark_format } else { &normal_format };
-                worksheet.write_string_with_format(row_idx as u32, range.width() as u16, status, format)
-                    .map_err(|e| crate::err::with_detail("excel_write_cell_failed", e))?;
-            }
-        }
-
-        new_workbook.save(&out_path)
-            .map_err(|e| crate::err::with_detail("excel_save_failed", e))?;
-
-        Some(out_path)
-    } else {
-        None
-    };
-
-    Ok(ExcelMatchResult {
-        total_rows,
-        matched_count,
-        missing_count,
-        items,
-        output_path: final_output_path,
-        truncated,
-    })
-}
-
 /// 基于 Excel 的完整性检查结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -417,6 +132,7 @@ pub struct ExcelIntegrityResult {
     pub items: Vec<ExcelIntegrityItem>,
     pub output_path: Option<String>,
     pub truncated: bool,
+    pub cancelled: bool,
 }
 
 /// 基于 Excel 的完整性检查项
@@ -440,18 +156,277 @@ pub struct TemplateCheckResult {
     pub exists: bool,
 }
 
-/// 判断是否为 CJK 统一汉字
+fn column_index_to_letter(index: usize) -> String {
+    let mut result = String::new();
+    let mut n = index;
+    loop {
+        result.insert(0, (b'A' + (n % 26) as u8) as char);
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    result
+}
+
+fn cell_to_string(cell: &Data) -> String {
+    match cell {
+        Data::String(s) => s.clone(),
+        Data::Int(i) => i.to_string(),
+        Data::Float(f) => f.to_string(),
+        Data::Bool(b) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn join_error(e: impl std::fmt::Display) -> String {
+    crate::err::with_detail("task_join_failed", e)
+}
+
+/// Match Excel values against collected names. Exact uses HashSet; fuzzy uses Aho-Corasick (one pass).
+fn match_rows_against_names(
+    values: &[(usize, String)],
+    file_names: &HashSet<String>,
+    match_mode: &str,
+) -> Vec<(bool, Option<String>)> {
+    let mut out: Vec<(bool, Option<String>)> = values
+        .iter()
+        .map(|(_, v)| {
+            if v.is_empty() {
+                (false, None)
+            } else {
+                (false, None)
+            }
+        })
+        .collect();
+
+    match match_mode {
+        "exact" => {
+            for (i, (_, value)) in values.iter().enumerate() {
+                if value.is_empty() {
+                    continue;
+                }
+                if file_names.contains(value) {
+                    out[i] = (true, Some(value.clone()));
+                }
+            }
+        }
+        "starts_with" | "contains" => {
+            let patterns: Vec<&str> = values
+                .iter()
+                .map(|(_, v)| v.as_str())
+                .collect();
+            // Empty pattern set → nothing to match
+            if patterns.iter().all(|p| p.is_empty()) {
+                return out;
+            }
+            // AhoCorasick rejects empty patterns; replace empties with unlikely sentinel (won't match).
+            let owned: Vec<String> = patterns
+                .iter()
+                .map(|p| {
+                    if p.is_empty() {
+                        "\u{FFFF}\u{FFFE}".to_string()
+                    } else {
+                        (*p).to_string()
+                    }
+                })
+                .collect();
+            let Ok(ac) = AhoCorasick::new(&owned) else {
+                // Fallback: linear scan
+                for (i, (_, value)) in values.iter().enumerate() {
+                    if value.is_empty() {
+                        continue;
+                    }
+                    for name in file_names {
+                        let hit = if match_mode == "starts_with" {
+                            name.starts_with(value)
+                        } else {
+                            name.contains(value)
+                        };
+                        if hit {
+                            out[i] = (true, Some(name.clone()));
+                            break;
+                        }
+                    }
+                }
+                return out;
+            };
+
+            let require_prefix = match_mode == "starts_with";
+            for name in file_names {
+                for mat in ac.find_iter(name) {
+                    if require_prefix && mat.start() != 0 {
+                        continue;
+                    }
+                    let i = mat.pattern().as_usize();
+                    if values[i].1.is_empty() {
+                        continue;
+                    }
+                    if out[i].1.is_none() {
+                        out[i] = (true, Some(name.clone()));
+                    }
+                }
+            }
+        }
+        _ => {
+            // Default: contains
+            return match_rows_against_names(values, file_names, "contains");
+        }
+    }
+
+    out
+}
+
+/// Bind Excel names to top-level person folders. Exact via HashMap; fuzzy via one-pass Aho-Corasick.
+fn bind_names_to_folders(
+    names: &[(usize, String)],
+    folders_by_full_name: &HashMap<String, PathBuf>,
+    folders_by_extracted: &HashMap<String, Vec<PathBuf>>,
+    folder_match_mode: &str,
+) -> Vec<Option<PathBuf>> {
+    let mut bound: Vec<Option<PathBuf>> = vec![None; names.len()];
+
+    // Exact full-name hits first
+    for (i, (_, name)) in names.iter().enumerate() {
+        if let Some(path) = folders_by_full_name.get(name) {
+            bound[i] = Some(path.clone());
+        }
+    }
+
+    if folder_match_mode == "exact" {
+        for (i, (_, name)) in names.iter().enumerate() {
+            if bound[i].is_some() {
+                continue;
+            }
+            if let Some(paths) = folders_by_extracted.get(name) {
+                if paths.len() == 1 {
+                    bound[i] = Some(paths[0].clone());
+                }
+            }
+        }
+        return bound;
+    }
+
+    // Fuzzy: collect unique hits per name index via AC over folder names
+    let owned: Vec<String> = names
+        .iter()
+        .map(|(_, n)| {
+            if n.is_empty() {
+                "\u{FFFF}\u{FFFE}".to_string()
+            } else {
+                n.clone()
+            }
+        })
+        .collect();
+    let Ok(ac) = AhoCorasick::new(&owned) else {
+        // Fallback linear
+        for (i, (_, name)) in names.iter().enumerate() {
+            if bound[i].is_some() || name.is_empty() {
+                continue;
+            }
+            let mut hits: Vec<PathBuf> = Vec::new();
+            for (folder_name, path) in folders_by_full_name {
+                let hit = if folder_match_mode == "starts_with" {
+                    folder_name.starts_with(name)
+                } else {
+                    folder_name.contains(name)
+                };
+                if hit {
+                    hits.push(path.clone());
+                }
+            }
+            if hits.len() == 1 {
+                bound[i] = Some(hits[0].clone());
+            } else if hits.is_empty() {
+                let mut extracted_hits = Vec::new();
+                for (extracted, paths) in folders_by_extracted {
+                    let hit = if folder_match_mode == "starts_with" {
+                        extracted.starts_with(name)
+                    } else {
+                        extracted.contains(name)
+                    };
+                    if hit {
+                        extracted_hits.extend(paths.iter().cloned());
+                    }
+                }
+                if extracted_hits.len() == 1 {
+                    bound[i] = Some(extracted_hits[0].clone());
+                }
+            }
+        }
+        return bound;
+    };
+
+    let require_prefix = folder_match_mode == "starts_with";
+    // name_idx -> list of candidate paths (from full folder names)
+    let mut full_hits: Vec<Vec<PathBuf>> = vec![Vec::new(); names.len()];
+    for (folder_name, path) in folders_by_full_name {
+        for mat in ac.find_iter(folder_name) {
+            if require_prefix && mat.start() != 0 {
+                continue;
+            }
+            let i = mat.pattern().as_usize();
+            if names[i].1.is_empty() || bound[i].is_some() {
+                continue;
+            }
+            if !full_hits[i].iter().any(|p| p == path) {
+                full_hits[i].push(path.clone());
+            }
+        }
+    }
+
+    for (i, hits) in full_hits.iter().enumerate() {
+        if bound[i].is_some() {
+            continue;
+        }
+        if hits.len() == 1 {
+            bound[i] = Some(hits[0].clone());
+        }
+    }
+
+    // Extracted-name fallback only when no full-name hits
+    let mut extracted_hits: Vec<Vec<PathBuf>> = vec![Vec::new(); names.len()];
+    for (extracted, paths) in folders_by_extracted {
+        for mat in ac.find_iter(extracted) {
+            if require_prefix && mat.start() != 0 {
+                continue;
+            }
+            let i = mat.pattern().as_usize();
+            if names[i].1.is_empty() || bound[i].is_some() {
+                continue;
+            }
+            if !full_hits[i].is_empty() {
+                continue;
+            }
+            for path in paths {
+                if !extracted_hits[i].iter().any(|p| p == path) {
+                    extracted_hits[i].push(path.clone());
+                }
+            }
+        }
+    }
+
+    for (i, hits) in extracted_hits.iter().enumerate() {
+        if bound[i].is_some() {
+            continue;
+        }
+        if hits.len() == 1 {
+            bound[i] = Some(hits[0].clone());
+        }
+    }
+
+    bound
+}
+
 fn is_cjk(c: char) -> bool {
-    matches!(c as u32,
+    matches!(
+        c as u32,
         0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF
     )
 }
 
-/// 从文件夹名提取姓名
 fn extract_name_from_folder(folder_name: &str, pattern: &str) -> String {
-    // 常见模式: "2025-0001王宏琳" -> "王宏琳"
     if pattern == "auto" || pattern.is_empty() {
-        // 自动提取：取最后一段连续 CJK 字符
         let chars: Vec<char> = folder_name.chars().collect();
         let mut end = None;
         let mut start = None;
@@ -473,7 +448,6 @@ fn extract_name_from_folder(folder_name: &str, pattern: &str) -> String {
 
         folder_name.to_string()
     } else {
-        // 限制正则长度，降低 ReDoS 风险
         if pattern.len() > 200 {
             return folder_name.to_string();
         }
@@ -488,12 +462,10 @@ fn extract_name_from_folder(folder_name: &str, pattern: &str) -> String {
     }
 }
 
-/// 模板内容是否匹配期望名（精确或「文件名 stem」）
 fn template_content_matches(content: &str, expected_name: &str) -> bool {
     if content == expected_name {
         return true;
     }
-    // 期望名无扩展名时，允许 content 的 stem 精确等于期望名
     if !expected_name.contains('.') {
         if let Some(stem) = Path::new(content).file_stem().and_then(|s| s.to_str()) {
             return stem == expected_name;
@@ -502,100 +474,437 @@ fn template_content_matches(content: &str, expected_name: &str) -> bool {
     false
 }
 
-/// 文件夹完整性检查
+fn find_template_in_contents(
+    contents: &HashSet<String>,
+    content_paths: &HashMap<String, String>,
+    expected_name: &str,
+) -> (bool, Option<String>) {
+    // Fast path: exact name / stem key
+    if contents.contains(expected_name) {
+        return (true, content_paths.get(expected_name).cloned());
+    }
+    for content in contents {
+        if template_content_matches(content, expected_name) {
+            return (true, content_paths.get(content).cloned());
+        }
+    }
+    (false, None)
+}
+
+/// 读取 Excel 文件信息
+#[tauri::command]
+pub async fn read_excel_info(
+    file_path: String,
+    sheet_index: Option<usize>,
+) -> Result<ExcelFileInfo, String> {
+    crate::path_util::validate_user_path(&file_path)?;
+    tokio::task::spawn_blocking(move || read_excel_info_sync(file_path, sheet_index))
+        .await
+        .map_err(join_error)?
+}
+
+fn read_excel_info_sync(
+    file_path: String,
+    sheet_index: Option<usize>,
+) -> Result<ExcelFileInfo, String> {
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        return Err(crate::err::code("file_not_found"));
+    }
+
+    let mut workbook: Xlsx<_> = open_workbook(&file_path)
+        .map_err(|e| crate::err::with_detail("excel_open_failed", e))?;
+
+    let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
+
+    if sheet_names.is_empty() {
+        return Err(crate::err::code("excel_no_sheets"));
+    }
+
+    let sheet_idx = sheet_index.unwrap_or(0);
+    let sheet_name = sheet_names
+        .get(sheet_idx)
+        .ok_or_else(|| crate::err::code("excel_sheet_index_invalid"))?
+        .clone();
+
+    let range = workbook
+        .worksheet_range(&sheet_name)
+        .map_err(|e| crate::err::with_detail("excel_sheet_read_failed", e))?;
+
+    let mut columns: Vec<ExcelColumnInfo> = Vec::new();
+    let row_count = range.height();
+
+    if let Some(first_row) = range.rows().next() {
+        for (idx, cell) in first_row.iter().enumerate() {
+            let name = cell_to_string(cell);
+            let name = if name.is_empty() {
+                format!("Column{}", idx + 1)
+            } else {
+                name
+            };
+
+            let mut sample_values: Vec<String> = Vec::new();
+            for (row_idx, row) in range.rows().enumerate() {
+                if row_idx == 0 {
+                    continue;
+                }
+                if sample_values.len() >= 5 {
+                    break;
+                }
+                if let Some(cell) = row.get(idx) {
+                    let value = cell_to_string(cell);
+                    if !value.is_empty() {
+                        sample_values.push(value);
+                    }
+                }
+            }
+
+            columns.push(ExcelColumnInfo {
+                index: idx,
+                name,
+                letter: column_index_to_letter(idx),
+                sample_values,
+            });
+        }
+    }
+
+    Ok(ExcelFileInfo {
+        sheets: sheet_names,
+        columns,
+        row_count: if row_count > 0 { row_count - 1 } else { 0 },
+    })
+}
+
+/// Excel 比对 - 与文件夹匹配（全树递归；一次点击扫完；支持 remote://）
+#[tauri::command]
+pub async fn match_excel_with_folder(
+    app: AppHandle,
+    store: State<'_, Arc<SmbSessionStore>>,
+    excel_path: String,
+    sheet_index: usize,
+    column_index: usize,
+    folder_path: String,
+    match_mode: String,
+    mark_color: String,
+    output_path: Option<String>,
+    job_id: Option<u64>,
+) -> Result<ExcelMatchResult, String> {
+    crate::path_util::validate_user_path(&excel_path)?;
+    crate::path_util::validate_user_path(&folder_path)?;
+    if let Some(ref out) = output_path {
+        crate::path_util::validate_user_path(out)?;
+    }
+    let job_id = resolve_job_id(job_id);
+
+    let pre_names = if crate::path_util::is_remote_path(&folder_path) {
+        emit_progress(&app, job_id, "scanning", 0, 0, "");
+        let names = collect_remote_names(store.as_ref(), &folder_path, &app, job_id).await?;
+        Some(names)
+    } else {
+        None
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        let result = match_excel_with_folder_sync(
+            app,
+            job_id,
+            excel_path,
+            sheet_index,
+            column_index,
+            folder_path,
+            match_mode,
+            mark_color,
+            output_path,
+            pre_names,
+        );
+        clear_cancel(job_id);
+        result
+    })
+    .await
+    .map_err(join_error)?;
+    result
+}
+
+fn match_excel_with_folder_sync(
+    app: AppHandle,
+    job_id: u64,
+    excel_path: String,
+    sheet_index: usize,
+    column_index: usize,
+    folder_path: String,
+    match_mode: String,
+    mark_color: String,
+    output_path: Option<String>,
+    pre_names: Option<(HashSet<String>, bool)>,
+) -> Result<ExcelMatchResult, String> {
+    emit_progress(&app, job_id, "reading_excel", 0, 0, "");
+
+    let mut workbook: Xlsx<_> = open_workbook(&excel_path)
+        .map_err(|e| crate::err::with_detail("excel_open_failed", e))?;
+
+    let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
+    let sheet_name = sheet_names
+        .get(sheet_index)
+        .ok_or_else(|| crate::err::code("excel_sheet_index_invalid"))?
+        .clone();
+
+    let range = workbook
+        .worksheet_range(&sheet_name)
+        .map_err(|e| crate::err::with_detail("excel_sheet_read_failed", e))?;
+
+    if is_cancelled(job_id) {
+        return Ok(ExcelMatchResult {
+            total_rows: 0,
+            matched_count: 0,
+            missing_count: 0,
+            items: vec![],
+            output_path: None,
+            truncated: false,
+            cancelled: true,
+        });
+    }
+
+    let (file_names, truncated) = if let Some(pre) = pre_names {
+        pre
+    } else {
+        emit_progress(&app, job_id, "scanning", 0, 0, "");
+        let folder = Path::new(&folder_path);
+        let counter = AtomicUsize::new(0);
+        if folder.exists() {
+            collect_names_under_cached(folder, job_id, Some((&app, &counter, 0)))
+        } else {
+            (HashSet::new(), false)
+        }
+    };
+
+    let cancelled = is_cancelled(job_id);
+    emit_progress(&app, job_id, "matching", 0, 0, "");
+
+    let mut values: Vec<(usize, String)> = Vec::new();
+    for (row_idx, row) in range.rows().enumerate() {
+        if row_idx == 0 {
+            continue;
+        }
+        let value = row
+            .get(column_index)
+            .map(cell_to_string)
+            .unwrap_or_default();
+        values.push((row_idx, value));
+    }
+
+    let match_results = match_rows_against_names(&values, &file_names, &match_mode);
+
+    let mut items: Vec<MatchResultItem> = Vec::with_capacity(values.len());
+    let mut matched_count = 0usize;
+    for (i, (row_idx, value)) in values.into_iter().enumerate() {
+        let (matched, matched_file) = match_results[i].clone();
+        if matched {
+            matched_count += 1;
+        }
+        items.push(MatchResultItem {
+            row_index: row_idx,
+            value,
+            matched,
+            matched_file,
+        });
+    }
+
+    let total_rows = items.len();
+    let missing_count = total_rows - matched_count;
+
+    // Incremental / partial export: still write whatever we have (including after cancel).
+    let final_output_path = if let Some(out_path) = output_path {
+        emit_progress(&app, job_id, "writing", 0, total_rows as u64, "");
+        let mut new_workbook = Workbook::new();
+        let worksheet = new_workbook.add_worksheet();
+
+        let mark_format = Format::new().set_background_color(match mark_color.as_str() {
+            "red" => Color::RGB(0xFF6B6B),
+            "yellow" => Color::RGB(0xFFE66D),
+            "green" => Color::RGB(0x6BCB77),
+            _ => Color::RGB(0xFF6B6B),
+        });
+
+        let normal_format = Format::new();
+        let header_format = Format::new()
+            .set_bold()
+            .set_background_color(Color::RGB(0xE8E8E8))
+            .set_border(FormatBorder::Thin);
+
+        for (row_idx, row) in range.rows().enumerate() {
+            let is_header = row_idx == 0;
+            let is_missing = if row_idx > 0 {
+                items
+                    .get(row_idx - 1)
+                    .map(|item| !item.matched)
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
+            for (col_idx, cell) in row.iter().enumerate() {
+                let value = cell_to_string(cell);
+                let format = if is_header {
+                    &header_format
+                } else if is_missing {
+                    &mark_format
+                } else {
+                    &normal_format
+                };
+
+                worksheet
+                    .write_string_with_format(row_idx as u32, col_idx as u16, &value, format)
+                    .map_err(|e| crate::err::with_detail("excel_write_cell_failed", e))?;
+            }
+
+            if is_header {
+                worksheet
+                    .write_string_with_format(
+                        row_idx as u32,
+                        range.width() as u16,
+                        "Match Status",
+                        &header_format,
+                    )
+                    .map_err(|e| crate::err::with_detail("excel_write_cell_failed", e))?;
+            } else if row_idx > 0 {
+                let status = if items
+                    .get(row_idx - 1)
+                    .map(|item| item.matched)
+                    .unwrap_or(false)
+                {
+                    "Matched"
+                } else {
+                    "Missing"
+                };
+                let format = if is_missing {
+                    &mark_format
+                } else {
+                    &normal_format
+                };
+                worksheet
+                    .write_string_with_format(
+                        row_idx as u32,
+                        range.width() as u16,
+                        status,
+                        format,
+                    )
+                    .map_err(|e| crate::err::with_detail("excel_write_cell_failed", e))?;
+            }
+        }
+
+        new_workbook
+            .save(&out_path)
+            .map_err(|e| crate::err::with_detail("excel_save_failed", e))?;
+
+        Some(out_path)
+    } else {
+        None
+    };
+
+    emit_progress(
+        &app,
+        job_id,
+        if cancelled { "cancelled" } else { "done" },
+        total_rows as u64,
+        total_rows as u64,
+        "",
+    );
+
+    Ok(ExcelMatchResult {
+        total_rows,
+        matched_count,
+        missing_count,
+        items,
+        output_path: final_output_path,
+        truncated,
+        cancelled,
+    })
+}
+
+/// 文件夹完整性检查（每个子文件夹下全树递归检查模板；并行限流；支持 remote://）
 #[tauri::command]
 pub async fn check_folder_integrity(
+    app: AppHandle,
+    store: State<'_, Arc<SmbSessionStore>>,
     target_folder: String,
-    templates: Vec<String>, // 如 ["{name}.docx", "{name}照片", "委托书.pdf"]
-    name_pattern: String, // 提取姓名的模式，"auto" 为自动提取
+    templates: Vec<String>,
+    name_pattern: String,
     output_path: Option<String>,
+    job_id: Option<u64>,
 ) -> Result<BatchIntegrityResult, String> {
     crate::path_util::validate_user_path(&target_folder)?;
     if let Some(ref out) = output_path {
         crate::path_util::validate_user_path(out)?;
     }
-    let folder = Path::new(&target_folder);
-    if !folder.exists() {
-        return Err(crate::err::code("target_folder_missing"));
+    let job_id = resolve_job_id(job_id);
+
+    if crate::path_util::is_remote_path(&target_folder) {
+        let result = check_folder_integrity_remote(
+            app,
+            store.as_ref(),
+            job_id,
+            target_folder,
+            templates,
+            name_pattern,
+            output_path,
+        )
+        .await;
+        clear_cancel(job_id);
+        return result;
     }
 
-    const INTEGRITY_FOLDER_CAP: usize = 50_000;
-    let mut results: Vec<FolderIntegrityResult> = Vec::new();
-    let mut complete_count = 0;
-    let mut truncated = false;
+    tokio::task::spawn_blocking(move || {
+        let result =
+            check_folder_integrity_sync(app, job_id, target_folder, templates, name_pattern, output_path);
+        clear_cancel(job_id);
+        result
+    })
+    .await
+    .map_err(join_error)?
+}
 
-    // 遍历子文件夹
-    for entry in fs::read_dir(&folder).map_err(|e| crate::err::with_detail("read_dir_failed", e))? {
-        let entry = entry.map_err(|e| crate::err::with_detail("read_dir_failed", e))?;
-        let path = entry.path();
-        
-        if !path.is_dir() {
-            continue;
-        }
-        if results.len() >= INTEGRITY_FOLDER_CAP {
-            truncated = true;
+async fn check_folder_integrity_remote(
+    app: AppHandle,
+    store: &SmbSessionStore,
+    job_id: u64,
+    target_folder: String,
+    templates: Vec<String>,
+    name_pattern: String,
+    output_path: Option<String>,
+) -> Result<BatchIntegrityResult, String> {
+    emit_progress(&app, job_id, "listing", 0, 0, "");
+    let mut person_folders = list_remote_person_folders(store, &target_folder).await?;
+    let mut truncated = false;
+    if person_folders.len() > INTEGRITY_PERSON_FOLDER_SOFT_CAP {
+        person_folders.truncate(INTEGRITY_PERSON_FOLDER_SOFT_CAP);
+        truncated = true;
+    }
+    let total = person_folders.len() as u64;
+    emit_progress(&app, job_id, "checking", 0, total, "");
+
+    let mut results: Vec<FolderIntegrityResult> = Vec::new();
+    let mut complete_count = 0usize;
+
+    for (idx, (folder_name, folder_path)) in person_folders.into_iter().enumerate() {
+        if is_cancelled(job_id) {
             break;
         }
-
-        let folder_name = path.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        // 提取姓名
         let extracted_name = extract_name_from_folder(&folder_name, &name_pattern);
-
-        // 收集本层 + 一层子目录中的文件名（模板常落在子文件夹）
-        let mut contents: HashSet<String> = HashSet::new();
-        let mut content_paths: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut collect_entry = |entry_path: &Path| {
-            if let Some(name) = entry_path.file_name().map(|n| n.to_string_lossy().to_string()) {
-                contents.insert(name.clone());
-                content_paths.entry(name).or_insert_with(|| entry_path.to_string_lossy().to_string());
-                if let Some(stem) = entry_path.file_stem().map(|s| s.to_string_lossy().to_string()) {
-                    contents.insert(stem.clone());
-                    content_paths.entry(stem).or_insert_with(|| entry_path.to_string_lossy().to_string());
-                }
-            }
-        };
-        for item in fs::read_dir(&path).map_err(|e| crate::err::with_detail("read_dir_failed", e))? {
-            let item = item.map_err(|e| crate::err::with_detail("read_dir_failed", e))?;
-            let item_path = item.path();
-            collect_entry(&item_path);
-            if item_path.is_dir() {
-                if let Ok(nested) = fs::read_dir(&item_path) {
-                    for nested_item in nested.flatten() {
-                        collect_entry(&nested_item.path());
-                    }
-                }
-            }
+        let (contents, content_paths, folder_truncated) =
+            collect_remote_contents(store, &folder_path, &app, job_id).await?;
+        if folder_truncated {
+            truncated = true;
         }
 
-        // 检查每个模板
         let mut check_items: Vec<IntegrityCheckItem> = Vec::new();
         let mut is_complete = true;
-
         for template in &templates {
             let expected_name = template.replace("{name}", &extracted_name);
-            
-            // 检查是否存在
-            let mut exists = false;
-            let mut found_path: Option<String> = None;
-
-            for content in &contents {
-                if template_content_matches(content, &expected_name) {
-                    exists = true;
-                    found_path = content_paths.get(content).cloned().or_else(|| {
-                        let candidate = path.join(content);
-                        Some(candidate.to_string_lossy().to_string())
-                    });
-                    break;
-                }
-            }
-
+            let (exists, found_path) =
+                find_template_in_contents(&contents, &content_paths, &expected_name);
             if !exists {
                 is_complete = false;
             }
-
             check_items.push(IntegrityCheckItem {
                 template: template.clone(),
                 expected_name,
@@ -603,74 +912,49 @@ pub async fn check_folder_integrity(
                 found_path,
             });
         }
-
         if is_complete {
             complete_count += 1;
         }
-
         results.push(FolderIntegrityResult {
-            folder_path: path.to_string_lossy().to_string(),
+            folder_path,
             folder_name,
             extracted_name,
             is_complete,
             check_items,
         });
+        let cur = (idx + 1) as u64;
+        if cur == 1 || cur % 5 == 0 || cur == total {
+            emit_progress(&app, job_id, "checking", cur, total, "");
+        }
     }
 
+    let cancelled = is_cancelled(job_id);
     let total_folders = results.len();
     let incomplete_count = total_folders - complete_count;
 
-    // 如果指定了输出路径，生成报告 Excel
     let final_output_path = if let Some(out_path) = output_path {
-        let mut workbook = Workbook::new();
-        let worksheet = workbook.add_worksheet();
-
-        let header_format = Format::new()
-            .set_bold()
-            .set_background_color(Color::RGB(0xE8E8E8))
-            .set_border(FormatBorder::Thin);
-
-        let ok_format = Format::new()
-            .set_background_color(Color::RGB(0xD4EDDA));
-
-        let missing_format = Format::new()
-            .set_background_color(Color::RGB(0xFF6B6B));
-
-        // 写入标题
-        worksheet.write_string_with_format(0, 0, "Folder", &header_format).ok();
-        worksheet.write_string_with_format(0, 1, "Name", &header_format).ok();
-        
-        for (idx, template) in templates.iter().enumerate() {
-            worksheet.write_string_with_format(0, (idx + 2) as u16, template, &header_format).ok();
-        }
-        worksheet.write_string_with_format(0, (templates.len() + 2) as u16, "Status", &header_format).ok();
-
-        // 写入数据
-        for (row_idx, result) in results.iter().enumerate() {
-            let row = (row_idx + 1) as u32;
-            
-            let row_format = if result.is_complete { &ok_format } else { &missing_format };
-            
-            worksheet.write_string_with_format(row, 0, &result.folder_name, row_format).ok();
-            worksheet.write_string_with_format(row, 1, &result.extracted_name, row_format).ok();
-
-            for (col_idx, item) in result.check_items.iter().enumerate() {
-                let status = if item.exists { "✓" } else { "✗" };
-                let format = if item.exists { &ok_format } else { &missing_format };
-                worksheet.write_string_with_format(row, (col_idx + 2) as u16, status, format).ok();
-            }
-
-            let status = if result.is_complete { "Complete" } else { "Missing" };
-            worksheet.write_string_with_format(row, (templates.len() + 2) as u16, status, row_format).ok();
-        }
-
-        workbook.save(&out_path)
-            .map_err(|e| crate::err::with_detail("excel_save_failed", e))?;
-
+        emit_progress(&app, job_id, "writing", total_folders as u64, total, "");
+        let templates_c = templates.clone();
+        let results_c = results.clone();
+        let out_path_c = out_path.clone();
+        tokio::task::spawn_blocking(move || {
+            write_batch_integrity_report(&out_path_c, &templates_c, &results_c)
+        })
+        .await
+        .map_err(join_error)??;
         Some(out_path)
     } else {
         None
     };
+
+    emit_progress(
+        &app,
+        job_id,
+        if cancelled { "cancelled" } else { "done" },
+        total_folders as u64,
+        total,
+        "",
+    );
 
     Ok(BatchIntegrityResult {
         total_folders,
@@ -679,23 +963,330 @@ pub async fn check_folder_integrity(
         results,
         output_path: final_output_path,
         truncated,
+        cancelled,
     })
 }
 
-/// 扫描文件夹目录树
+fn write_batch_integrity_report(
+    out_path: &str,
+    templates: &[String],
+    results: &[FolderIntegrityResult],
+) -> Result<(), String> {
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    let header_format = Format::new()
+        .set_bold()
+        .set_background_color(Color::RGB(0xE8E8E8))
+        .set_border(FormatBorder::Thin);
+    let ok_format = Format::new().set_background_color(Color::RGB(0xD4EDDA));
+    let missing_format = Format::new().set_background_color(Color::RGB(0xFF6B6B));
+    worksheet
+        .write_string_with_format(0, 0, "Folder", &header_format)
+        .ok();
+    worksheet
+        .write_string_with_format(0, 1, "Name", &header_format)
+        .ok();
+    for (idx, template) in templates.iter().enumerate() {
+        worksheet
+            .write_string_with_format(0, (idx + 2) as u16, template, &header_format)
+            .ok();
+    }
+    worksheet
+        .write_string_with_format(0, (templates.len() + 2) as u16, "Status", &header_format)
+        .ok();
+    for (row_idx, result) in results.iter().enumerate() {
+        let row = (row_idx + 1) as u32;
+        let row_format = if result.is_complete {
+            &ok_format
+        } else {
+            &missing_format
+        };
+        worksheet
+            .write_string_with_format(row, 0, &result.folder_name, row_format)
+            .ok();
+        worksheet
+            .write_string_with_format(row, 1, &result.extracted_name, row_format)
+            .ok();
+        for (col_idx, item) in result.check_items.iter().enumerate() {
+            let status = if item.exists { "✓" } else { "✗" };
+            let format = if item.exists {
+                &ok_format
+            } else {
+                &missing_format
+            };
+            worksheet
+                .write_string_with_format(row, (col_idx + 2) as u16, status, format)
+                .ok();
+        }
+        let status = if result.is_complete {
+            "Complete"
+        } else {
+            "Missing"
+        };
+        worksheet
+            .write_string_with_format(row, (templates.len() + 2) as u16, status, row_format)
+            .ok();
+    }
+    workbook
+        .save(out_path)
+        .map_err(|e| crate::err::with_detail("excel_save_failed", e))?;
+    Ok(())
+}
+
+fn check_one_person_folder(
+    path: &Path,
+    templates: &[String],
+    name_pattern: &str,
+    job_id: u64,
+) -> Option<(FolderIntegrityResult, bool)> {
+    if is_cancelled(job_id) {
+        return None;
+    }
+    let folder_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let extracted_name = extract_name_from_folder(&folder_name, name_pattern);
+    let (contents, content_paths, folder_truncated) =
+        collect_contents_under_cached(path, job_id);
+
+    let mut check_items: Vec<IntegrityCheckItem> = Vec::new();
+    let mut is_complete = true;
+    for template in templates {
+        let expected_name = template.replace("{name}", &extracted_name);
+        let (exists, found_path) =
+            find_template_in_contents(&contents, &content_paths, &expected_name);
+        if !exists {
+            is_complete = false;
+        }
+        check_items.push(IntegrityCheckItem {
+            template: template.clone(),
+            expected_name,
+            exists,
+            found_path,
+        });
+    }
+
+    Some((
+        FolderIntegrityResult {
+            folder_path: path.to_string_lossy().to_string(),
+            folder_name,
+            extracted_name,
+            is_complete,
+            check_items,
+        },
+        folder_truncated,
+    ))
+}
+
+fn check_folder_integrity_sync(
+    app: AppHandle,
+    job_id: u64,
+    target_folder: String,
+    templates: Vec<String>,
+    name_pattern: String,
+    output_path: Option<String>,
+) -> Result<BatchIntegrityResult, String> {
+    let folder = Path::new(&target_folder);
+    if !folder.exists() {
+        return Err(crate::err::code("target_folder_missing"));
+    }
+
+    emit_progress(&app, job_id, "listing", 0, 0, "");
+    let mut person_folders = list_person_folders(folder)?;
+    let mut truncated = false;
+    if person_folders.len() > INTEGRITY_PERSON_FOLDER_SOFT_CAP {
+        person_folders.truncate(INTEGRITY_PERSON_FOLDER_SOFT_CAP);
+        truncated = true;
+    }
+    let total = person_folders.len() as u64;
+    emit_progress(&app, job_id, "checking", 0, total, "");
+
+    let done = AtomicUsize::new(0);
+    let trunc_flag = AtomicUsize::new(if truncated { 1 } else { 0 });
+    let concurrency = check_concurrency(&target_folder);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .build()
+        .map_err(|e| crate::err::with_detail("thread_pool_failed", e))?;
+
+    let results: Vec<FolderIntegrityResult> = pool.install(|| {
+        person_folders
+            .par_iter()
+            .filter_map(|path| {
+                if is_cancelled(job_id) {
+                    return None;
+                }
+                let outcome = check_one_person_folder(path, &templates, &name_pattern, job_id)?;
+                if outcome.1 {
+                    trunc_flag.store(1, Ordering::Relaxed);
+                }
+                let cur = done.fetch_add(1, Ordering::Relaxed) + 1;
+                if cur == 1 || cur % 10 == 0 || cur as u64 == total {
+                    emit_progress(&app, job_id, "checking", cur as u64, total, "");
+                }
+                Some(outcome.0)
+            })
+            .collect()
+    });
+
+    let cancelled = is_cancelled(job_id);
+    truncated = trunc_flag.load(Ordering::Relaxed) > 0;
+    let complete_count = results.iter().filter(|r| r.is_complete).count();
+    let total_folders = results.len();
+    let incomplete_count = total_folders - complete_count;
+
+    let final_output_path = if let Some(out_path) = output_path {
+        emit_progress(&app, job_id, "writing", total_folders as u64, total, "");
+        let mut workbook = Workbook::new();
+        let worksheet = workbook.add_worksheet();
+
+        let header_format = Format::new()
+            .set_bold()
+            .set_background_color(Color::RGB(0xE8E8E8))
+            .set_border(FormatBorder::Thin);
+
+        let ok_format = Format::new().set_background_color(Color::RGB(0xD4EDDA));
+        let missing_format = Format::new().set_background_color(Color::RGB(0xFF6B6B));
+
+        worksheet
+            .write_string_with_format(0, 0, "Folder", &header_format)
+            .ok();
+        worksheet
+            .write_string_with_format(0, 1, "Name", &header_format)
+            .ok();
+
+        for (idx, template) in templates.iter().enumerate() {
+            worksheet
+                .write_string_with_format(0, (idx + 2) as u16, template, &header_format)
+                .ok();
+        }
+        worksheet
+            .write_string_with_format(0, (templates.len() + 2) as u16, "Status", &header_format)
+            .ok();
+
+        for (row_idx, result) in results.iter().enumerate() {
+            let row = (row_idx + 1) as u32;
+            let row_format = if result.is_complete {
+                &ok_format
+            } else {
+                &missing_format
+            };
+
+            worksheet
+                .write_string_with_format(row, 0, &result.folder_name, row_format)
+                .ok();
+            worksheet
+                .write_string_with_format(row, 1, &result.extracted_name, row_format)
+                .ok();
+
+            for (col_idx, item) in result.check_items.iter().enumerate() {
+                let status = if item.exists { "✓" } else { "✗" };
+                let format = if item.exists {
+                    &ok_format
+                } else {
+                    &missing_format
+                };
+                worksheet
+                    .write_string_with_format(row, (col_idx + 2) as u16, status, format)
+                    .ok();
+            }
+
+            let status = if result.is_complete {
+                "Complete"
+            } else {
+                "Missing"
+            };
+            worksheet
+                .write_string_with_format(row, (templates.len() + 2) as u16, status, row_format)
+                .ok();
+        }
+
+        workbook
+            .save(&out_path)
+            .map_err(|e| crate::err::with_detail("excel_save_failed", e))?;
+
+        Some(out_path)
+    } else {
+        None
+    };
+
+    emit_progress(
+        &app,
+        job_id,
+        if cancelled { "cancelled" } else { "done" },
+        total_folders as u64,
+        total,
+        "",
+    );
+
+    Ok(BatchIntegrityResult {
+        total_folders,
+        complete_count,
+        incomplete_count,
+        results,
+        output_path: final_output_path,
+        truncated,
+        cancelled,
+    })
+}
+
+/// 扫描文件夹目录树（UI 预览用；默认浅层；支持 remote:// 第一层）
 #[tauri::command]
-pub async fn scan_folder_tree(folder_path: String, max_depth: Option<usize>) -> Result<FolderTreeResult, String> {
+pub async fn scan_folder_tree(
+    store: State<'_, Arc<SmbSessionStore>>,
+    folder_path: String,
+    max_depth: Option<usize>,
+) -> Result<FolderTreeResult, String> {
     crate::path_util::validate_user_path(&folder_path)?;
+    if crate::path_util::is_remote_path(&folder_path) {
+        let (children, files, folders) =
+            scan_remote_folder_tree_shallow(store.as_ref(), &folder_path).await?;
+        let root_name = folder_path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(&folder_path)
+            .to_string();
+        let child_nodes: Vec<FileTreeNode> = children
+            .into_iter()
+            .map(|(name, path, is_dir)| FileTreeNode {
+                name,
+                path,
+                is_dir,
+                children: Vec::new(),
+            })
+            .collect();
+        return Ok(FolderTreeResult {
+            root: FileTreeNode {
+                name: root_name,
+                path: folder_path,
+                is_dir: true,
+                children: child_nodes,
+            },
+            total_files: files,
+            total_folders: folders,
+            truncated: false,
+        });
+    }
+    tokio::task::spawn_blocking(move || scan_folder_tree_sync(folder_path, max_depth))
+        .await
+        .map_err(join_error)?
+}
+
+fn scan_folder_tree_sync(
+    folder_path: String,
+    max_depth: Option<usize>,
+) -> Result<FolderTreeResult, String> {
     let folder = Path::new(&folder_path);
     if !folder.exists() {
         return Err(crate::err::code("folder_not_found"));
     }
 
-    // null/None → 16 层（平衡完整性与性能），显式传入时上限 32
-    let depth = max_depth.unwrap_or(16).clamp(1, 32);
+    // UI preview defaults to 1 level (lazy). Explicit deeper preview allowed up to 8.
+    let depth = max_depth.unwrap_or(1).clamp(1, 8);
     let mut total_files = 0;
     let mut total_folders = 0;
-    const TREE_ENTRY_CAP: usize = 50_000;
 
     fn build_tree(
         path: &Path,
@@ -706,21 +1297,19 @@ pub async fn scan_folder_tree(folder_path: String, max_depth: Option<usize>) -> 
         truncated: &mut bool,
         entry_cap: usize,
     ) -> FileTreeNode {
-        let name = path.file_name()
+        let name = path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
-        
+
         let is_dir = path.is_dir();
         let mut children = Vec::new();
 
         if is_dir {
             *total_folders += 1;
-            if *truncated {
-                // Cap already hit higher up — keep node stub without walking further.
-            } else if current_depth < max_depth {
+            if !*truncated && current_depth < max_depth {
                 if let Ok(entries) = fs::read_dir(path) {
                     let mut entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-                    // 排序：文件夹在前，文件在后
                     entries_vec.sort_by(|a, b| {
                         let a_is_dir = a.path().is_dir();
                         let b_is_dir = b.path().is_dir();
@@ -748,8 +1337,6 @@ pub async fn scan_folder_tree(folder_path: String, max_depth: Option<usize>) -> 
                         children.push(child);
                     }
                 }
-            } else if fs::read_dir(path).map(|mut e| e.next().is_some()).unwrap_or(false) {
-                *truncated = true;
             }
         } else {
             *total_files += 1;
@@ -771,7 +1358,7 @@ pub async fn scan_folder_tree(folder_path: String, max_depth: Option<usize>) -> 
         &mut total_files,
         &mut total_folders,
         &mut truncated,
-        TREE_ENTRY_CAP,
+        TREE_ENTRY_SOFT_CAP,
     );
 
     Ok(FolderTreeResult {
@@ -782,215 +1369,224 @@ pub async fn scan_folder_tree(folder_path: String, max_depth: Option<usize>) -> 
     })
 }
 
-/// 基于 Excel 的完整性检查（在原 Excel 上标注结果）
+/// 基于 Excel 的完整性检查（人名文件夹下全树递归找模板；支持 remote://）
 #[tauri::command]
 pub async fn check_integrity_with_excel(
+    app: AppHandle,
+    store: State<'_, Arc<SmbSessionStore>>,
     excel_path: String,
     sheet_index: usize,
-    name_column_index: usize,  // 姓名列索引
-    target_folder: String,     // 目标文件夹
-    templates: Vec<String>,    // 模板列表
-    folder_match_mode: String, // 文件夹匹配模式: "exact" | "contains" | "starts_with"
+    name_column_index: usize,
+    target_folder: String,
+    templates: Vec<String>,
+    folder_match_mode: String,
     output_path: Option<String>,
+    job_id: Option<u64>,
 ) -> Result<ExcelIntegrityResult, String> {
     crate::path_util::validate_user_path(&excel_path)?;
     crate::path_util::validate_user_path(&target_folder)?;
     if let Some(ref out) = output_path {
         crate::path_util::validate_user_path(out)?;
     }
-    // 读取 Excel
-    let mut workbook: Xlsx<_> = open_workbook(&excel_path)
-        .map_err(|e| crate::err::with_detail("excel_open_failed", e))?;
+    let job_id = resolve_job_id(job_id);
 
-    let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
-    let sheet_name = sheet_names.get(sheet_index)
-        .ok_or_else(|| crate::err::code("excel_sheet_index_invalid"))?
-        .clone();
-
-    let range = workbook.worksheet_range(&sheet_name)
-        .map_err(|e| crate::err::with_detail("excel_sheet_read_failed", e))?;
-
-    // 检查目标文件夹是否存在
-    let folder = Path::new(&target_folder);
-    if !folder.exists() {
-        return Err(crate::err::code("target_folder_missing"));
+    if crate::path_util::is_remote_path(&target_folder) {
+        let result = check_integrity_with_excel_remote(
+            app,
+            store.as_ref(),
+            job_id,
+            excel_path,
+            sheet_index,
+            name_column_index,
+            target_folder,
+            templates,
+            folder_match_mode,
+            output_path,
+        )
+        .await;
+        clear_cancel(job_id);
+        return result;
     }
 
-    // 收集所有子文件夹（完整名 + 提取名分别索引，冲突时优先保留完整文件夹名）
-    let mut folders_by_full_name: std::collections::HashMap<String, std::path::PathBuf> =
-        std::collections::HashMap::new();
-    let mut folders_by_extracted: std::collections::HashMap<String, Vec<std::path::PathBuf>> =
-        std::collections::HashMap::new();
-    for entry in fs::read_dir(&folder).map_err(|e| crate::err::with_detail("read_dir_failed", e))? {
-        let entry = entry.map_err(|e| crate::err::with_detail("read_dir_failed", e))?;
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(name) = path.file_name() {
-                let folder_name = name.to_string_lossy().to_string();
-                folders_by_full_name.insert(folder_name.clone(), path.clone());
-                let extracted = extract_name_from_folder(&folder_name, "auto");
-                folders_by_extracted
-                    .entry(extracted)
-                    .or_default()
-                    .push(path);
+    tokio::task::spawn_blocking(move || {
+        let result = check_integrity_with_excel_sync(
+            app,
+            job_id,
+            excel_path,
+            sheet_index,
+            name_column_index,
+            target_folder,
+            templates,
+            folder_match_mode,
+            output_path,
+        );
+        clear_cancel(job_id);
+        result
+    })
+    .await
+    .map_err(join_error)?
+}
+
+async fn check_integrity_with_excel_remote(
+    app: AppHandle,
+    store: &SmbSessionStore,
+    job_id: u64,
+    excel_path: String,
+    sheet_index: usize,
+    name_column_index: usize,
+    target_folder: String,
+    templates: Vec<String>,
+    folder_match_mode: String,
+    output_path: Option<String>,
+) -> Result<ExcelIntegrityResult, String> {
+    emit_progress(&app, job_id, "listing", 0, 0, "");
+    let person_folders = list_remote_person_folders(store, &target_folder).await?;
+    let mut truncated = person_folders.len() > INTEGRITY_PERSON_FOLDER_SOFT_CAP;
+    let person_folders: Vec<_> = person_folders
+        .into_iter()
+        .take(INTEGRITY_PERSON_FOLDER_SOFT_CAP)
+        .collect();
+
+    let mut folders_by_full_name: HashMap<String, PathBuf> = HashMap::new();
+    let mut folders_by_extracted: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for (folder_name, folder_path) in &person_folders {
+        let path = PathBuf::from(folder_path);
+        folders_by_full_name.insert(folder_name.clone(), path.clone());
+        let extracted = extract_name_from_folder(folder_name, "auto");
+        folders_by_extracted
+            .entry(extracted)
+            .or_default()
+            .push(path);
+    }
+
+    emit_progress(&app, job_id, "reading_excel", 0, 0, "");
+    let names: Vec<(usize, String)> = tokio::task::spawn_blocking({
+        let excel_path = excel_path.clone();
+        move || -> Result<Vec<(usize, String)>, String> {
+            let mut workbook: Xlsx<_> = open_workbook(&excel_path)
+                .map_err(|e| crate::err::with_detail("excel_open_failed", e))?;
+            let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
+            let sheet_name = sheet_names
+                .get(sheet_index)
+                .ok_or_else(|| crate::err::code("excel_sheet_index_invalid"))?
+                .clone();
+            let range = workbook
+                .worksheet_range(&sheet_name)
+                .map_err(|e| crate::err::with_detail("excel_sheet_read_failed", e))?;
+            let mut names = Vec::new();
+            for (row_idx, row) in range.rows().enumerate() {
+                if row_idx == 0 {
+                    continue;
+                }
+                let name = row
+                    .get(name_column_index)
+                    .map(cell_to_string)
+                    .unwrap_or_default();
+                if name.trim().is_empty() {
+                    continue;
+                }
+                if names.len() >= INTEGRITY_ROW_SOFT_CAP {
+                    break;
+                }
+                names.push((row_idx, name));
+            }
+            Ok(names)
+        }
+    })
+    .await
+    .map_err(join_error)??;
+
+    if names.len() >= INTEGRITY_ROW_SOFT_CAP {
+        truncated = true;
+    }
+
+    let bound = bind_names_to_folders(
+        &names,
+        &folders_by_full_name,
+        &folders_by_extracted,
+        &folder_match_mode,
+    );
+
+    let mut unique_paths: Vec<PathBuf> = Vec::new();
+    {
+        let mut seen = HashSet::new();
+        for p in bound.iter().flatten() {
+            let key = p.to_string_lossy().to_string();
+            if seen.insert(key) {
+                unique_paths.push(p.clone());
             }
         }
     }
 
-    let mut items: Vec<ExcelIntegrityItem> = Vec::new();
-    // excel_row -> item index（用于导出对齐；空姓名行不入 items）
-    let mut row_to_item: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    emit_progress(&app, job_id, "scanning", 0, unique_paths.len() as u64, "");
+    let mut cache: HashMap<String, (HashSet<String>, HashMap<String, String>)> = HashMap::new();
+    for (i, matched_path) in unique_paths.iter().enumerate() {
+        if is_cancelled(job_id) {
+            break;
+        }
+        let key = matched_path.to_string_lossy().to_string();
+        let (contents, content_paths, folder_truncated) =
+            collect_remote_contents(store, &key, &app, job_id).await?;
+        if folder_truncated {
+            truncated = true;
+        }
+        cache.insert(key, (contents, content_paths));
+        let cur = (i + 1) as u64;
+        if cur == 1 || cur % 5 == 0 {
+            emit_progress(&app, job_id, "scanning", cur, unique_paths.len() as u64, "");
+        }
+    }
+
+    let total = names.len() as u64;
+    emit_progress(&app, job_id, "checking", 0, total, "");
+    let mut items: Vec<ExcelIntegrityItem> = Vec::with_capacity(names.len());
     let mut complete_count = 0;
     let mut incomplete_count = 0;
     let mut not_found_count = 0;
-    let mut processed_rows = 0;
-    let mut truncated = false;
-    const INTEGRITY_ROW_CAP: usize = 50_000;
 
-    // 遍历 Excel 行（跳过标题行）
-    for (row_idx, row) in range.rows().enumerate() {
-        if row_idx == 0 {
-            continue; // 跳过标题行
-        }
-
-        // 获取姓名列的值
-        let name = row.get(name_column_index)
-            .map(|cell| match cell {
-                Data::String(s) => s.clone(),
-                Data::Int(i) => i.to_string(),
-                Data::Float(f) => f.to_string(),
-                _ => String::new(),
-            })
-            .unwrap_or_default();
-
-        if name.trim().is_empty() {
-            continue;
-        }
-        if processed_rows >= INTEGRITY_ROW_CAP {
-            truncated = true;
+    for (i, (row_idx, name)) in names.iter().enumerate() {
+        if is_cancelled(job_id) {
             break;
         }
-        processed_rows += 1;
-
-        // 查找匹配的文件夹：先完整名，再提取名；exact 模式下不模糊
-        let mut matched_folder: Option<std::path::PathBuf> = None;
-
-        if let Some(path) = folders_by_full_name.get(&name) {
-            matched_folder = Some(path.clone());
-        } else {
-            match folder_match_mode.as_str() {
-                "exact" => {
-                    // 提取名冲突时宁可不匹配，避免错绑文件夹
-                    if let Some(paths) = folders_by_extracted.get(&name) {
-                        if paths.len() == 1 {
-                            matched_folder = Some(paths[0].clone());
-                        }
-                    }
-                }
-                "starts_with" => {
-                    // 仅在唯一命中时绑定，避免模糊匹配绑错文件夹
-                    let full_hits: Vec<_> = folders_by_full_name
-                        .iter()
-                        .filter(|(folder_name, _)| folder_name.starts_with(&name))
-                        .map(|(_, path)| path.clone())
-                        .collect();
-                    if full_hits.len() == 1 {
-                        matched_folder = Some(full_hits[0].clone());
-                    } else if full_hits.is_empty() {
-                        let mut extracted_hits = Vec::new();
-                        for (extracted, paths) in &folders_by_extracted {
-                            if extracted.starts_with(&name) {
-                                extracted_hits.extend(paths.iter().cloned());
-                            }
-                        }
-                        if extracted_hits.len() == 1 {
-                            matched_folder = Some(extracted_hits[0].clone());
-                        }
-                    }
-                }
-                _ => {
-                    let full_hits: Vec<_> = folders_by_full_name
-                        .iter()
-                        .filter(|(folder_name, _)| folder_name.contains(&name))
-                        .map(|(_, path)| path.clone())
-                        .collect();
-                    if full_hits.len() == 1 {
-                        matched_folder = Some(full_hits[0].clone());
-                    } else if full_hits.is_empty() {
-                        let mut extracted_hits = Vec::new();
-                        for (extracted, paths) in &folders_by_extracted {
-                            if extracted.contains(&name) {
-                                extracted_hits.extend(paths.iter().cloned());
-                            }
-                        }
-                        if extracted_hits.len() == 1 {
-                            matched_folder = Some(extracted_hits[0].clone());
-                        }
-                    }
-                }
-            }
-        }
-
+        let matched_folder = bound[i].clone();
         let folder_found = matched_folder.is_some();
-        let folder_path = matched_folder.as_ref().map(|p| p.to_string_lossy().to_string());
-
-        // 检查模板文件是否存在
+        let folder_path = matched_folder
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
         let mut check_results: Vec<TemplateCheckResult> = Vec::new();
         let mut is_complete = folder_found;
 
         if let Some(ref matched_path) = matched_folder {
-            // 本层 + 一层子目录
-            let mut contents: HashSet<String> = HashSet::new();
-            let mut collect_entry = |entry_path: &Path| {
-                if let Some(name) = entry_path.file_name().map(|n| n.to_string_lossy().to_string()) {
-                    contents.insert(name);
-                    if let Some(stem) = entry_path.file_stem().map(|s| s.to_string_lossy().to_string()) {
-                        contents.insert(stem);
+            let key = matched_path.to_string_lossy().to_string();
+            if let Some((contents, content_paths)) = cache.get(&key) {
+                for template in &templates {
+                    let expected_name = template.replace("{name}", name);
+                    let (exists, _) =
+                        find_template_in_contents(contents, content_paths, &expected_name);
+                    if !exists {
+                        is_complete = false;
                     }
+                    check_results.push(TemplateCheckResult {
+                        template: template.clone(),
+                        expected_name,
+                        exists,
+                    });
                 }
-            };
-            if let Ok(entries) = fs::read_dir(matched_path) {
-                for item in entries.flatten() {
-                    let item_path = item.path();
-                    collect_entry(&item_path);
-                    if item_path.is_dir() {
-                        if let Ok(nested) = fs::read_dir(&item_path) {
-                            for nested_item in nested.flatten() {
-                                collect_entry(&nested_item.path());
-                            }
-                        }
-                    }
+            } else {
+                is_complete = false;
+                for template in &templates {
+                    check_results.push(TemplateCheckResult {
+                        template: template.clone(),
+                        expected_name: template.replace("{name}", name),
+                        exists: false,
+                    });
                 }
-            }
-
-            // 检查每个模板
-            for template in &templates {
-                let expected_name = template.replace("{name}", &name);
-                let mut exists = false;
-
-                for content in &contents {
-                    if template_content_matches(content, &expected_name) {
-                        exists = true;
-                        break;
-                    }
-                }
-
-                if !exists {
-                    is_complete = false;
-                }
-
-                check_results.push(TemplateCheckResult {
-                    template: template.clone(),
-                    expected_name,
-                    exists,
-                });
             }
         } else {
-            // 文件夹未找到，所有模板都标记为不存在
             for template in &templates {
                 check_results.push(TemplateCheckResult {
                     template: template.clone(),
-                    expected_name: template.replace("{name}", &name),
+                    expected_name: template.replace("{name}", name),
                     exists: false,
                 });
             }
@@ -1004,9 +1600,8 @@ pub async fn check_integrity_with_excel(
             not_found_count += 1;
         }
 
-        row_to_item.insert(row_idx, items.len());
         items.push(ExcelIntegrityItem {
-            row_index: row_idx,
+            row_index: *row_idx,
             name: name.clone(),
             folder_found,
             folder_path,
@@ -1015,44 +1610,422 @@ pub async fn check_integrity_with_excel(
         });
     }
 
-    let total_rows = processed_rows;
+    let cancelled = is_cancelled(job_id);
+    let total_rows = items.len();
 
-    // 如果指定了输出路径，在原 Excel 基础上标注
+    // Annotate export still needs original sheet — reuse local sync writer via blocking re-open
     let final_output_path = if let Some(out_path) = output_path {
+        emit_progress(&app, job_id, "writing", total_rows as u64, total, "");
+        let items_c = items.clone();
+        let templates_c = templates.clone();
+        let out_path_c = out_path.clone();
+        let excel_path_c = excel_path.clone();
+        tokio::task::spawn_blocking(move || {
+            write_excel_integrity_annotated(
+                &excel_path_c,
+                sheet_index,
+                &templates_c,
+                &items_c,
+                &out_path_c,
+            )
+        })
+        .await
+        .map_err(join_error)??;
+        Some(out_path)
+    } else {
+        None
+    };
+
+    emit_progress(
+        &app,
+        job_id,
+        if cancelled { "cancelled" } else { "done" },
+        total_rows as u64,
+        total,
+        "",
+    );
+
+    Ok(ExcelIntegrityResult {
+        total_rows,
+        complete_count,
+        incomplete_count,
+        not_found_count,
+        items,
+        output_path: final_output_path,
+        truncated,
+        cancelled,
+    })
+}
+
+fn write_excel_integrity_annotated(
+    excel_path: &str,
+    sheet_index: usize,
+    templates: &[String],
+    items: &[ExcelIntegrityItem],
+    out_path: &str,
+) -> Result<(), String> {
+    let mut workbook: Xlsx<_> = open_workbook(excel_path)
+        .map_err(|e| crate::err::with_detail("excel_open_failed", e))?;
+    let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
+    let sheet_name = sheet_names
+        .get(sheet_index)
+        .ok_or_else(|| crate::err::code("excel_sheet_index_invalid"))?
+        .clone();
+    let range = workbook
+        .worksheet_range(&sheet_name)
+        .map_err(|e| crate::err::with_detail("excel_sheet_read_failed", e))?;
+
+    let mut row_to_item: HashMap<usize, usize> = HashMap::new();
+    for (idx, item) in items.iter().enumerate() {
+        row_to_item.insert(item.row_index, idx);
+    }
+
+    let mut new_workbook = Workbook::new();
+    let worksheet = new_workbook.add_worksheet();
+    let header_format = Format::new()
+        .set_bold()
+        .set_background_color(Color::RGB(0xE8E8E8))
+        .set_border(FormatBorder::Thin);
+    let ok_format = Format::new().set_background_color(Color::RGB(0xD4EDDA));
+    let missing_format = Format::new().set_background_color(Color::RGB(0xFF6B6B));
+    let not_found_format = Format::new().set_background_color(Color::RGB(0xFFE66D));
+    let normal_format = Format::new();
+    let original_width = range.width();
+
+    for (row_idx, row) in range.rows().enumerate() {
+        let is_header = row_idx == 0;
+        let item = if row_idx > 0 {
+            row_to_item.get(&row_idx).and_then(|idx| items.get(*idx))
+        } else {
+            None
+        };
+        let row_format = if is_header {
+            &header_format
+        } else if let Some(item) = item {
+            if item.is_complete {
+                &ok_format
+            } else if item.folder_found {
+                &missing_format
+            } else {
+                &not_found_format
+            }
+        } else {
+            &normal_format
+        };
+
+        for (col_idx, cell) in row.iter().enumerate() {
+            let value = cell_to_string(cell);
+            worksheet
+                .write_string_with_format(row_idx as u32, col_idx as u16, &value, row_format)
+                .map_err(|e| crate::err::with_detail("excel_write_cell_failed", e))?;
+        }
+
+        if is_header {
+            for (idx, template) in templates.iter().enumerate() {
+                worksheet
+                    .write_string_with_format(
+                        0,
+                        (original_width + idx) as u16,
+                        template,
+                        &header_format,
+                    )
+                    .ok();
+            }
+            worksheet
+                .write_string_with_format(
+                    0,
+                    (original_width + templates.len()) as u16,
+                    "Check Result",
+                    &header_format,
+                )
+                .ok();
+        } else if let Some(item) = item {
+            for (idx, check) in item.check_results.iter().enumerate() {
+                let status = if check.exists { "✓" } else { "✗" };
+                let format = if check.exists {
+                    &ok_format
+                } else {
+                    &missing_format
+                };
+                worksheet
+                    .write_string_with_format(
+                        row_idx as u32,
+                        (original_width + idx) as u16,
+                        status,
+                        format,
+                    )
+                    .ok();
+            }
+            let status = if item.is_complete {
+                "Complete"
+            } else if item.folder_found {
+                "Missing Files"
+            } else {
+                "Folder Not Found"
+            };
+            worksheet
+                .write_string_with_format(
+                    row_idx as u32,
+                    (original_width + templates.len()) as u16,
+                    status,
+                    row_format,
+                )
+                .ok();
+        }
+    }
+
+    new_workbook
+        .save(out_path)
+        .map_err(|e| crate::err::with_detail("excel_save_failed", e))?;
+    Ok(())
+}
+
+fn check_integrity_with_excel_sync(
+    app: AppHandle,
+    job_id: u64,
+    excel_path: String,
+    sheet_index: usize,
+    name_column_index: usize,
+    target_folder: String,
+    templates: Vec<String>,
+    folder_match_mode: String,
+    output_path: Option<String>,
+) -> Result<ExcelIntegrityResult, String> {
+    emit_progress(&app, job_id, "reading_excel", 0, 0, "");
+    let mut workbook: Xlsx<_> = open_workbook(&excel_path)
+        .map_err(|e| crate::err::with_detail("excel_open_failed", e))?;
+
+    let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
+    let sheet_name = sheet_names
+        .get(sheet_index)
+        .ok_or_else(|| crate::err::code("excel_sheet_index_invalid"))?
+        .clone();
+
+    let range = workbook
+        .worksheet_range(&sheet_name)
+        .map_err(|e| crate::err::with_detail("excel_sheet_read_failed", e))?;
+
+    let folder = Path::new(&target_folder);
+    if !folder.exists() {
+        return Err(crate::err::code("target_folder_missing"));
+    }
+
+    emit_progress(&app, job_id, "listing", 0, 0, "");
+    let mut folders_by_full_name: HashMap<String, PathBuf> = HashMap::new();
+    let mut folders_by_extracted: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut folder_count = 0usize;
+    let mut truncated = false;
+
+    for path in list_person_folders(folder)? {
+        if is_cancelled(job_id) {
+            break;
+        }
+        folder_count += 1;
+        if folder_count > INTEGRITY_PERSON_FOLDER_SOFT_CAP {
+            truncated = true;
+            break;
+        }
+        if let Some(name) = path.file_name() {
+            let folder_name = name.to_string_lossy().to_string();
+            folders_by_full_name.insert(folder_name.clone(), path.clone());
+            let extracted = extract_name_from_folder(&folder_name, "auto");
+            folders_by_extracted
+                .entry(extracted)
+                .or_default()
+                .push(path);
+        }
+    }
+
+    let mut names: Vec<(usize, String)> = Vec::new();
+    for (row_idx, row) in range.rows().enumerate() {
+        if row_idx == 0 {
+            continue;
+        }
+        let name = row
+            .get(name_column_index)
+            .map(cell_to_string)
+            .unwrap_or_default();
+        if name.trim().is_empty() {
+            continue;
+        }
+        if names.len() >= INTEGRITY_ROW_SOFT_CAP {
+            truncated = true;
+            break;
+        }
+        names.push((row_idx, name));
+    }
+
+    let bound = bind_names_to_folders(
+        &names,
+        &folders_by_full_name,
+        &folders_by_extracted,
+        &folder_match_mode,
+    );
+
+    // Unique matched folders — walk in parallel (cached)
+    let mut unique_paths: Vec<PathBuf> = Vec::new();
+    {
+        let mut seen = HashSet::new();
+        for p in bound.iter().flatten() {
+            let key = p.to_string_lossy().to_string();
+            if seen.insert(key) {
+                unique_paths.push(p.clone());
+            }
+        }
+    }
+
+    let total = names.len() as u64;
+    emit_progress(&app, job_id, "scanning", 0, unique_paths.len() as u64, "");
+
+    let concurrency = check_concurrency(&target_folder);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .build()
+        .map_err(|e| crate::err::with_detail("thread_pool_failed", e))?;
+
+    let scanned = AtomicUsize::new(0);
+    let trunc_flag = AtomicUsize::new(if truncated { 1 } else { 0 });
+    let contents_cache: Mutex<HashMap<String, (HashSet<String>, HashMap<String, String>)>> =
+        Mutex::new(HashMap::new());
+
+    pool.install(|| {
+        unique_paths.par_iter().for_each(|matched_path| {
+            if is_cancelled(job_id) {
+                return;
+            }
+            let (contents, content_paths, folder_truncated) =
+                collect_contents_under_cached(matched_path, job_id);
+            if folder_truncated {
+                trunc_flag.store(1, Ordering::Relaxed);
+            }
+            let key = matched_path.to_string_lossy().to_string();
+            if let Ok(mut guard) = contents_cache.lock() {
+                guard.insert(key, (contents, content_paths));
+            }
+            let cur = scanned.fetch_add(1, Ordering::Relaxed) + 1;
+            if cur == 1 || cur % 8 == 0 {
+                emit_progress(
+                    &app,
+                    job_id,
+                    "scanning",
+                    cur as u64,
+                    unique_paths.len() as u64,
+                    "",
+                );
+            }
+        });
+    });
+
+    emit_progress(&app, job_id, "checking", 0, total, "");
+    let cache = contents_cache.into_inner().unwrap_or_default();
+    truncated = trunc_flag.load(Ordering::Relaxed) > 0;
+
+    let mut items: Vec<ExcelIntegrityItem> = Vec::with_capacity(names.len());
+    let mut row_to_item: HashMap<usize, usize> = HashMap::new();
+    let mut complete_count = 0;
+    let mut incomplete_count = 0;
+    let mut not_found_count = 0;
+
+    for (i, (row_idx, name)) in names.iter().enumerate() {
+        if is_cancelled(job_id) {
+            break;
+        }
+        let matched_folder = bound[i].clone();
+        let folder_found = matched_folder.is_some();
+        let folder_path = matched_folder
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+
+        let mut check_results: Vec<TemplateCheckResult> = Vec::new();
+        let mut is_complete = folder_found;
+
+        if let Some(ref matched_path) = matched_folder {
+            let key = matched_path.to_string_lossy().to_string();
+            if let Some((contents, content_paths)) = cache.get(&key) {
+                for template in &templates {
+                    let expected_name = template.replace("{name}", name);
+                    let (exists, _) =
+                        find_template_in_contents(contents, content_paths, &expected_name);
+                    if !exists {
+                        is_complete = false;
+                    }
+                    check_results.push(TemplateCheckResult {
+                        template: template.clone(),
+                        expected_name,
+                        exists,
+                    });
+                }
+            } else {
+                is_complete = false;
+                for template in &templates {
+                    check_results.push(TemplateCheckResult {
+                        template: template.clone(),
+                        expected_name: template.replace("{name}", name),
+                        exists: false,
+                    });
+                }
+            }
+        } else {
+            for template in &templates {
+                check_results.push(TemplateCheckResult {
+                    template: template.clone(),
+                    expected_name: template.replace("{name}", name),
+                    exists: false,
+                });
+            }
+        }
+
+        if is_complete {
+            complete_count += 1;
+        } else if folder_found {
+            incomplete_count += 1;
+        } else {
+            not_found_count += 1;
+        }
+
+        row_to_item.insert(*row_idx, items.len());
+        items.push(ExcelIntegrityItem {
+            row_index: *row_idx,
+            name: name.clone(),
+            folder_found,
+            folder_path,
+            is_complete,
+            check_results,
+        });
+
+        if (i + 1) % 50 == 0 {
+            emit_progress(&app, job_id, "checking", (i + 1) as u64, total, "");
+        }
+    }
+
+    let cancelled = is_cancelled(job_id);
+    let total_rows = items.len();
+
+    let final_output_path = if let Some(out_path) = output_path {
+        emit_progress(&app, job_id, "writing", total_rows as u64, total, "");
         let mut new_workbook = Workbook::new();
         let worksheet = new_workbook.add_worksheet();
 
-        // 定义格式
         let header_format = Format::new()
             .set_bold()
             .set_background_color(Color::RGB(0xE8E8E8))
             .set_border(FormatBorder::Thin);
 
-        let ok_format = Format::new()
-            .set_background_color(Color::RGB(0xD4EDDA));
-
-        let missing_format = Format::new()
-            .set_background_color(Color::RGB(0xFF6B6B));
-
-        let not_found_format = Format::new()
-            .set_background_color(Color::RGB(0xFFE66D));
-
+        let ok_format = Format::new().set_background_color(Color::RGB(0xD4EDDA));
+        let missing_format = Format::new().set_background_color(Color::RGB(0xFF6B6B));
+        let not_found_format = Format::new().set_background_color(Color::RGB(0xFFE66D));
         let normal_format = Format::new();
 
-        // 写入原始数据 + 新增的检查结果列
         let original_width = range.width();
 
         for (row_idx, row) in range.rows().enumerate() {
             let is_header = row_idx == 0;
-            
-            // 按 Excel 原始行号对齐检查结果（跳过空姓名行）
             let item = if row_idx > 0 {
                 row_to_item.get(&row_idx).and_then(|idx| items.get(*idx))
             } else {
                 None
             };
 
-            // 确定行格式
             let row_format = if is_header {
                 &header_format
             } else if let Some(item) = item {
@@ -1067,51 +2040,50 @@ pub async fn check_integrity_with_excel(
                 &normal_format
             };
 
-            // 写入原始列
             for (col_idx, cell) in row.iter().enumerate() {
-                let value = match cell {
-                    Data::String(s) => s.clone(),
-                    Data::Int(i) => i.to_string(),
-                    Data::Float(f) => f.to_string(),
-                    Data::Bool(b) => b.to_string(),
-                    _ => String::new(),
-                };
-                worksheet.write_string_with_format(row_idx as u32, col_idx as u16, &value, row_format)
+                let value = cell_to_string(cell);
+                worksheet
+                    .write_string_with_format(row_idx as u32, col_idx as u16, &value, row_format)
                     .map_err(|e| crate::err::with_detail("excel_write_cell_failed", e))?;
             }
 
-            // 写入检查结果列
             if is_header {
-                // 写入模板列标题
                 for (idx, template) in templates.iter().enumerate() {
-                    worksheet.write_string_with_format(
-                        0, 
-                        (original_width + idx) as u16, 
-                        template, 
-                        &header_format
-                    ).ok();
+                    worksheet
+                        .write_string_with_format(
+                            0,
+                            (original_width + idx) as u16,
+                            template,
+                            &header_format,
+                        )
+                        .ok();
                 }
-                // 写入状态列标题
-                worksheet.write_string_with_format(
-                    0, 
-                    (original_width + templates.len()) as u16, 
-                    "Check Result", 
-                    &header_format
-                ).ok();
+                worksheet
+                    .write_string_with_format(
+                        0,
+                        (original_width + templates.len()) as u16,
+                        "Check Result",
+                        &header_format,
+                    )
+                    .ok();
             } else if let Some(item) = item {
-                // 写入每个模板的检查结果
                 for (idx, check) in item.check_results.iter().enumerate() {
                     let status = if check.exists { "✓" } else { "✗" };
-                    let format = if check.exists { &ok_format } else { &missing_format };
-                    worksheet.write_string_with_format(
-                        row_idx as u32, 
-                        (original_width + idx) as u16, 
-                        status, 
-                        format
-                    ).ok();
+                    let format = if check.exists {
+                        &ok_format
+                    } else {
+                        &missing_format
+                    };
+                    worksheet
+                        .write_string_with_format(
+                            row_idx as u32,
+                            (original_width + idx) as u16,
+                            status,
+                            format,
+                        )
+                        .ok();
                 }
 
-                // 写入总状态
                 let status = if item.is_complete {
                     "Complete"
                 } else if item.folder_found {
@@ -1119,22 +2091,34 @@ pub async fn check_integrity_with_excel(
                 } else {
                     "Folder Not Found"
                 };
-                worksheet.write_string_with_format(
-                    row_idx as u32, 
-                    (original_width + templates.len()) as u16, 
-                    status, 
-                    row_format
-                ).ok();
+                worksheet
+                    .write_string_with_format(
+                        row_idx as u32,
+                        (original_width + templates.len()) as u16,
+                        status,
+                        row_format,
+                    )
+                    .ok();
             }
         }
 
-        new_workbook.save(&out_path)
+        new_workbook
+            .save(&out_path)
             .map_err(|e| crate::err::with_detail("excel_save_failed", e))?;
 
         Some(out_path)
     } else {
         None
     };
+
+    emit_progress(
+        &app,
+        job_id,
+        if cancelled { "cancelled" } else { "done" },
+        total_rows as u64,
+        total,
+        "",
+    );
 
     Ok(ExcelIntegrityResult {
         total_rows,
@@ -1144,5 +2128,6 @@ pub async fn check_integrity_with_excel(
         items,
         output_path: final_output_path,
         truncated,
+        cancelled,
     })
 }

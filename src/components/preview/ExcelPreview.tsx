@@ -33,18 +33,29 @@ export const ExcelPreview: React.FC<ExcelPreviewProps> = ({ filePath }) => {
       setSheets([]);
 
       try {
-        // Read file as binary
+        const MAX_PREVIEW_BYTES = 15 * 1024 * 1024;
+        const MAX_PREVIEW_ROWS = 1000;
+
         const data = await readFile(filePath);
-        
+
         if (abortRef.current) return;
-        
+
+        if (data.byteLength > MAX_PREVIEW_BYTES) {
+          setError(
+            t('preview.excel.fileTooLarge', {
+              maxMb: Math.floor(MAX_PREVIEW_BYTES / (1024 * 1024)),
+            })
+          );
+          return;
+        }
+
         const workbook = XLSX.read(data, { type: 'array' });
 
         const sheetsData: SheetData[] = [];
 
         for (const sheetName of workbook.SheetNames) {
           if (abortRef.current) return;
-          
+
           const worksheet = workbook.Sheets[sheetName];
           const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
 
@@ -53,13 +64,11 @@ export const ExcelPreview: React.FC<ExcelPreviewProps> = ({ filePath }) => {
             continue;
           }
 
-          // First row as headers
           const headers = (jsonData[0] || []).map((h, i) =>
             String(h || t('preview.excel.defaultColumn', { index: i + 1 }))
           );
-          
-          // Rest as data rows
-          const rows = jsonData.slice(1).map((row, rowIndex) => {
+
+          const rows = jsonData.slice(1, 1 + MAX_PREVIEW_ROWS).map((row, rowIndex) => {
             const rowData: Record<string, any> = { key: rowIndex };
             headers.forEach((header, colIndex) => {
               rowData[header] = row[colIndex] ?? '';

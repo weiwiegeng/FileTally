@@ -27,18 +27,25 @@ export const WordPreview: React.FC<WordPreviewProps> = ({ filePath }) => {
       setHtmlContent('');
 
       try {
-        // Read file as binary
+        const MAX_PREVIEW_BYTES = 12 * 1024 * 1024;
         const data = await readFile(filePath);
 
         if (abortRef.current) return;
 
-        // 使用 slice 确保 ArrayBuffer 不含偏移多余字节
+        if (data.byteLength > MAX_PREVIEW_BYTES) {
+          setError(
+            t('preview.word.fileTooLarge', {
+              maxMb: Math.floor(MAX_PREVIEW_BYTES / (1024 * 1024)),
+            })
+          );
+          return;
+        }
+
         const arrayBuffer = data.buffer.slice(
           data.byteOffset,
           data.byteOffset + data.byteLength
         );
 
-        // Convert to HTML using mammoth
         const result = await mammoth.convertToHtml({ arrayBuffer });
 
         if (abortRef.current) return;

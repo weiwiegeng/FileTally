@@ -280,20 +280,13 @@ fn analyze_folder_sync(
         return Err(crate::err::with_detail("path_not_dir", &path));
     }
 
+    // Single-pass: no separate counting WalkDir (saves a full NAS/local traversal).
     let _ = app.emit("analysis-progress", AnalysisProgress {
-        stage: "counting".to_string(),
+        stage: "analyzing".to_string(),
         current: 0,
         total: 0,
         message: String::new(),
     });
-
-    let total_entries: u64 = WalkDir::new(dir_path)
-        .follow_links(false)
-        .max_depth(ANALYSIS_MAX_DEPTH)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .take(ANALYSIS_MAX_ENTRIES as usize)
-        .count() as u64;
 
     let large_file_threshold = large_file_threshold_mb * 1024 * 1024;
     let now = SystemTime::now()
@@ -326,12 +319,13 @@ fn analyze_folder_sync(
             break;
         }
         
-        if processed - last_emit >= 100 || (total_entries > 0 && processed * 100 / total_entries > last_emit * 100 / total_entries.max(1)) {
+        if processed - last_emit >= 100 {
             last_emit = processed;
             let _ = app.emit("analysis-progress", AnalysisProgress {
                 stage: "analyzing".to_string(),
                 current: processed,
-                total: total_entries,
+                // total 0 => frontend indeterminate / count-up display
+                total: 0,
                 message: String::new(),
             });
         }
@@ -459,8 +453,8 @@ fn analyze_folder_sync(
 
     let _ = app.emit("analysis-progress", AnalysisProgress {
         stage: "complete".to_string(),
-        current: total_entries,
-        total: total_entries,
+        current: processed,
+        total: processed,
         message: String::new(),
     });
 

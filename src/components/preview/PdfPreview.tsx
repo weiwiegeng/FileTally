@@ -43,10 +43,21 @@ export const PdfPreview: React.FC<PdfPreviewProps> = ({ filePath }) => {
       renderingRef.current.clear();
       
       try {
+        const MAX_PREVIEW_BYTES = 40 * 1024 * 1024;
         const fileData = await readFile(filePath);
-        
+
         if (cancelled) return;
-        
+
+        if (fileData.byteLength > MAX_PREVIEW_BYTES) {
+          setError(
+            t('preview.pdf.fileTooLarge', {
+              maxMb: Math.floor(MAX_PREVIEW_BYTES / (1024 * 1024)),
+            })
+          );
+          setLoading(false);
+          return;
+        }
+
         const loadingTask = pdfjsLib.getDocument({
           data: fileData,
           useWorkerFetch: false,

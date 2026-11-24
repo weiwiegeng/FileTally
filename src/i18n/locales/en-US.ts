@@ -565,6 +565,23 @@ const enUS = {
       previewNameExtract: 'Name extraction: {{mode}}',
     },
     filterExcel: 'Excel',
+    progress: {
+      working: 'Checking…',
+      cancel: 'Cancel check',
+      etaSeconds: '~{{seconds}}s left',
+      etaMinutes: '~{{minutes}} min left',
+      stage: {
+        preparing: 'Preparing',
+        reading_excel: 'Reading Excel',
+        listing: 'Listing case folders',
+        scanning: 'Scanning files',
+        matching: 'Matching',
+        checking: 'Integrity check',
+        writing: 'Writing results',
+        done: 'Done',
+        cancelled: 'Cancelled',
+      },
+    },
     messages: {
       openFileFailed: 'Failed to open file: {{error}}',
       readSheetFailed: 'Failed to read worksheet: {{error}}',
@@ -573,8 +590,19 @@ const enUS = {
       matchDoneSaved: 'Match complete. Results saved to: {{path}}',
       matchDone: 'Match complete',
       matchFailed: 'Match failed: {{error}}',
-      truncatedWarning: 'Directory scan hit the limit; results may be incomplete',
+      truncatedWarning:
+        'Directory is extremely large and hit a safety cap; results may be incomplete (normal sizes scan every subfolder and file)',
       scanTreeFailed: 'Failed to scan folder tree: {{error}}',
+      treePreviewHint:
+        'Preview shows the first level only; Start Check recursively scans all nested folders and files',
+      remoteNeedSystemMount:
+        'Smart Check does not support direct SMB paths. Use System Mount for the NAS, then pick the mounted local path for a full-tree check.',
+      remoteCheckHint:
+        'Direct SMB mode: the check walks every nested folder/file over the network and may be slower on large trees. You can cancel anytime.',
+      cancelRequested: 'Cancel requested; stopping…',
+      cancelFailed: 'Failed to cancel: {{error}}',
+      checkCancelled:
+        'Check cancelled; if an export path was chosen, completed partial results were saved when possible',
       integrityPrerequisiteTemplates: 'Select a target folder and add check templates first',
       integrityPrerequisiteExcel:
         'Select an Excel file, name column, target folder, and check templates first',
@@ -603,7 +631,8 @@ const enUS = {
       remoteFolder: 'Remote Folder',
       remotePrefix: 'Remote: ',
       scanning: 'Scanning...',
-      treeSummary: '{{folders}} folder(s), {{files}} file(s)',
+      treeSummary:
+        'First level: {{folders}} folder(s), {{files}} file(s) (match still walks the full tree)',
       step3Title: '3. Match Options',
       matchModeLabel: 'Match mode:',
       matchExact: 'Exact match',
@@ -638,13 +667,14 @@ const enUS = {
       nameColumnPlaceholder: 'Select column containing names',
       folderMatchModeLabel: 'Folder match mode:',
       scanModeAlert:
-        'Scan mode walks all subfolders under the target folder and extracts names from folder names for checking',
-      step2Title: '2. Select folder to check (all subfolders)',
+        'One check recursively scans every nested folder and file under each case folder—no need to expand nodes. The UI preview shows the first level only.',
+      step2Title: '2. Select folder to check (full tree in one run)',
       localFolder: 'Local Folder',
       remoteFolder: 'Remote Folder',
       remotePrefix: 'Remote: ',
       scanning: 'Scanning...',
-      treeSummary: '{{folders}} subfolder(s), {{files}} file(s)',
+      treeSummary:
+        'First level: {{folders}} subfolder(s), {{files}} file(s) (check still walks the full tree)',
       step3Title: '3. Required file templates',
       templateHint:
         'Use {name} as the name placeholder, e.g. {name}.docx becomes John.docx. One template per line.',
@@ -814,6 +844,7 @@ const enUS = {
       loadFailed: 'Could not load Word document: {{error}}',
       loading: 'Loading Word document...',
       errorTitle: 'Word preview failed',
+      fileTooLarge: 'Word file too large (>{{maxMb}} MB) for full preview',
     },
     pdf: {
       loadFailed: 'Could not load PDF: {{error}}',
@@ -821,6 +852,7 @@ const enUS = {
       loading: 'Loading PDF...',
       errorTitle: 'PDF preview failed',
       pageCount: '{{count}} page(s)',
+      fileTooLarge: 'PDF too large (>{{maxMb}} MB); open with a system viewer',
     },
     excel: {
       defaultColumn: 'Column {{index}}',
@@ -829,6 +861,8 @@ const enUS = {
       errorTitle: 'Excel preview failed',
       empty: 'Excel file is empty',
       paginationTotal: '{{total}} row(s)',
+      fileTooLarge:
+        'File too large (>{{maxMb}} MB) for full preview; use Smart Check for large sheets',
     },
     image: {
       loading: 'Loading image...',
@@ -897,6 +931,9 @@ const enUS = {
     excel_sheet_read_failed: 'Failed to read worksheet',
     excel_write_cell_failed: 'Failed to write cell',
     excel_save_failed: 'Failed to save Excel',
+    excel_remote_need_system_mount:
+      'Smart Check does not support direct SMB; use a system-mounted local path',
+    task_join_failed: 'Background task failed',
     analysis_task_failed: 'Analysis task failed',
     read_dir_failed: 'Failed to read directory',
     remote_path_invalid: 'Invalid remote path',

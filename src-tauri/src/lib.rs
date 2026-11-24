@@ -6,13 +6,13 @@ mod path_util;
 use std::sync::Arc;
 
 use commands::{
-    analyze_folder, cancel_search, cancel_transfer, check_folder_integrity,
+    analyze_folder, cancel_excel_check, cancel_search, cancel_transfer, check_folder_integrity,
     check_integrity_with_excel, check_keywords, check_path_exists, check_transfer_conflicts,
     connect_smb, connect_system_smb, disconnect_smb, get_disks, get_file_preview, get_home_dir,
     get_path_info, list_folder_contents, list_remote_dir, list_volumes, match_excel_with_folder,
-    prepare_search, prepare_transfer, read_excel_info, refresh_disks, remote_path_exists,
-    remote_path_info, rename_file, scan_cleanup_suggestions, scan_directory, scan_folder_tree,
-    search_files, transfer_files, transfer_files_remote, SmbSessionStore,
+    prepare_excel_check, prepare_search, prepare_transfer, read_excel_info, refresh_disks,
+    remote_path_exists, remote_path_info, rename_file, scan_cleanup_suggestions, scan_directory,
+    scan_folder_tree, search_files, transfer_files, transfer_files_remote, SmbSessionStore,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -32,6 +32,8 @@ pub fn run() {
             check_keywords,
             prepare_search,
             cancel_search,
+            prepare_excel_check,
+            cancel_excel_check,
             check_path_exists,
             list_volumes,
             analyze_folder,

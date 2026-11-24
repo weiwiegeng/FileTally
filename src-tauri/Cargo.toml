@@ -57,4 +57,5 @@ sha2 = "0.10"
 # Excel processing
 calamine = "0.26"
 rust_xlsxwriter = "0.79"
+aho-corasick = "1"
 

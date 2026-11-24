@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Card,
   Space,
@@ -36,8 +36,10 @@ import {
   SaveOutlined,
   DeleteOutlined,
   SettingOutlined,
+  StopOutlined,
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { useTranslation } from 'react-i18next';
 import i18n from '../../i18n';
@@ -76,6 +78,7 @@ interface ExcelMatchResult {
   items: MatchResultItem[];
   outputPath: string | null;
   truncated?: boolean;
+  cancelled?: boolean;
 }
 
 interface IntegrityCheckItem {
@@ -100,6 +103,7 @@ interface BatchIntegrityResult {
   results: FolderIntegrityResult[];
   outputPath: string | null;
   truncated?: boolean;
+  cancelled?: boolean;
 }
 
 // 基于 Excel 的完整性检查结果
@@ -126,6 +130,7 @@ interface ExcelIntegrityResult {
   items: ExcelIntegrityItem[];
   outputPath: string | null;
   truncated?: boolean;
+  cancelled?: boolean;
 }
 
 // 文件树节点
@@ -152,6 +157,15 @@ interface TreeDataNode {
   isLeaf?: boolean;
 }
 
+
+interface ExcelCheckProgress {
+  jobId: number;
+  stage: string;
+  current: number;
+  total: number;
+  message: string;
+}
+
 export const ExcelCheck: React.FC = () => {
   const { t } = useTranslation();
 
@@ -166,6 +180,9 @@ export const ExcelCheck: React.FC = () => {
   const [markColor, setMarkColor] = useState<string>('red');
   const [matchResult, setMatchResult] = useState<ExcelMatchResult | null>(null);
   const [matching, setMatching] = useState(false);
+  const [checkProgress, setCheckProgress] = useState<ExcelCheckProgress | null>(null);
+  const [progressStartedAt, setProgressStartedAt] = useState<number | null>(null);
+  const activeJobIdRef = useRef<number | null>(null);
 
   // 完整性检查状态
   const [integrityFolder, setIntegrityFolder] = useState<string>('');
@@ -211,7 +228,7 @@ export const ExcelCheck: React.FC = () => {
       setTemplates(config.templates);
       setNamePattern(config.namePattern);
       selectConfig(configId);
-      // 如果有目标文件夹，自动扫描
+      // 预览只扫一层；真正检查时后端会全树递归
       if (config.targetFolder) {
         scanFolderTree(config.targetFolder, 'integrity');
       }
@@ -273,6 +290,57 @@ export const ExcelCheck: React.FC = () => {
     message.success(t('excel.config.deleted'));
   };
 
+
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    listen<ExcelCheckProgress>('excel-check-progress', (event) => {
+      const payload = event.payload;
+      if (activeJobIdRef.current != null && payload.jobId !== activeJobIdRef.current) {
+        return;
+      }
+      setCheckProgress(payload);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  const formatEta = (current: number, total: number, startedAt: number | null) => {
+    if (!startedAt || total <= 0 || current <= 0) return null;
+    const elapsed = (Date.now() - startedAt) / 1000;
+    const rate = current / elapsed;
+    if (rate <= 0) return null;
+    const remain = Math.max(0, Math.round((total - current) / rate));
+    if (remain < 60) return t('excel.progress.etaSeconds', { seconds: remain });
+    return t('excel.progress.etaMinutes', { minutes: Math.ceil(remain / 60) });
+  };
+
+  const beginCheckJob = async () => {
+    const jobId = await invoke<number>('prepare_excel_check');
+    activeJobIdRef.current = jobId;
+    setCheckProgress({ jobId, stage: 'preparing', current: 0, total: 0, message: '' });
+    setProgressStartedAt(Date.now());
+    return jobId;
+  };
+
+  const handleCancelCheck = async () => {
+    const jobId = activeJobIdRef.current;
+    try {
+      await invoke('cancel_excel_check', { jobId });
+      message.info(t('excel.messages.cancelRequested'));
+    } catch (error) {
+      message.error(t('excel.messages.cancelFailed', { error: mapBackendError(error) }));
+    }
+  };
+
+  const finishCheckJob = () => {
+    activeJobIdRef.current = null;
+    setCheckProgress(null);
+    setProgressStartedAt(null);
+  };
+
   // 将后端文件树转换为 Ant Design Tree 格式
   const convertToTreeData = (node: FileTreeNode): TreeDataNode => {
     return {
@@ -284,13 +352,13 @@ export const ExcelCheck: React.FC = () => {
     };
   };
 
-  // 扫描文件夹树
+  // UI 预览：只扫第一层，不限制子文件夹数量；智能检查另走全树递归，无需点开每个节点
   const scanFolderTree = async (folderPath: string, target: 'match' | 'integrity') => {
     setScanningTree(true);
     try {
       const result = await invoke<FolderTreeResult>('scan_folder_tree', {
         folderPath,
-        maxDepth: 16, // 与后端默认一致，上限 32
+        maxDepth: 1,
       });
 
       const treeData = result.root.children?.map(convertToTreeData) || [];
@@ -401,9 +469,15 @@ export const ExcelCheck: React.FC = () => {
     if (remoteSelectorTarget === 'match') {
       setTargetFolder(path);
       setIsRemote(true);
+      setMatchFolderTree(null);
+      setMatchTreeInfo(null);
+      scanFolderTree(path, 'match');
     } else {
       setIntegrityFolder(path);
       setIntegrityIsRemote(true);
+      setIntegrityFolderTree(null);
+      setIntegrityTreeInfo(null);
+      scanFolderTree(path, 'integrity');
     }
     setRemoteSelectorVisible(false);
   };
@@ -414,18 +488,14 @@ export const ExcelCheck: React.FC = () => {
       message.warning(t('excel.messages.matchPrerequisite'));
       return;
     }
-
     setMatching(true);
     try {
-      // 先获取保存路径（取消则不导出，仍执行比对）
       const outputPath = await save({
         defaultPath: excelPath.replace(/\.xlsx?$/i, t('excel.defaults.matchOutputSuffix')),
         filters: [{ name: t('excel.filterExcel'), extensions: ['xlsx'] }],
       });
-      if (outputPath === null) {
-        // 用户取消保存对话框：仅比对、不写文件
-      }
 
+      const jobId = await beginCheckJob();
       const result = await invoke<ExcelMatchResult>('match_excel_with_folder', {
         excelPath,
         sheetIndex: selectedSheet,
@@ -434,22 +504,26 @@ export const ExcelCheck: React.FC = () => {
         matchMode,
         markColor,
         outputPath: outputPath || null,
+        jobId,
       });
 
       setMatchResult(result);
 
-      if (result.truncated) {
+      if (result.cancelled) {
+        message.warning(t('excel.messages.checkCancelled'));
+      } else if (result.truncated) {
         message.warning(t('excel.messages.truncatedWarning'));
       }
       if (result.outputPath) {
         message.success(t('excel.messages.matchDoneSaved', { path: result.outputPath }));
-      } else {
+      } else if (!result.cancelled) {
         message.success(t('excel.messages.matchDone'));
       }
     } catch (error) {
       message.error(t('excel.messages.matchFailed', { error: mapBackendError(error) }));
     } finally {
       setMatching(false);
+      finishCheckJob();
     }
   };
 
@@ -459,36 +533,39 @@ export const ExcelCheck: React.FC = () => {
       message.warning(t('excel.messages.integrityPrerequisiteTemplates'));
       return;
     }
-
     setChecking(true);
     try {
-      // 获取保存路径；取消则仅检查不导出
       const outputPath = await save({
         defaultPath: t('excel.defaults.integrityReportFileName'),
         filters: [{ name: t('excel.filterExcel'), extensions: ['xlsx'] }],
       });
 
+      const jobId = await beginCheckJob();
       const result = await invoke<BatchIntegrityResult>('check_folder_integrity', {
         targetFolder: integrityFolder,
         templates,
         namePattern,
         outputPath: outputPath || null,
+        jobId,
       });
 
       setIntegrityResult(result);
 
-      if (result.truncated) {
+      if (result.cancelled) {
+        message.warning(t('excel.messages.checkCancelled'));
+      } else if (result.truncated) {
         message.warning(t('excel.messages.truncatedWarning'));
       }
       if (result.outputPath) {
         message.success(t('excel.messages.checkDoneSavedReport', { path: result.outputPath }));
-      } else {
+      } else if (!result.cancelled) {
         message.success(t('excel.messages.checkDone'));
       }
     } catch (error) {
       message.error(t('excel.messages.checkFailed', { error: mapBackendError(error) }));
     } finally {
       setChecking(false);
+      finishCheckJob();
     }
   };
 
@@ -544,15 +621,14 @@ export const ExcelCheck: React.FC = () => {
       message.warning(t('excel.messages.integrityPrerequisiteExcel'));
       return;
     }
-
     setChecking(true);
     try {
-      // 获取保存路径；取消则仅检查不导出
       const outputPath = await save({
         defaultPath: integrityExcelPath.replace(/\.xlsx?$/i, t('excel.defaults.integrityOutputSuffix')),
         filters: [{ name: t('excel.filterExcel'), extensions: ['xlsx'] }],
       });
 
+      const jobId = await beginCheckJob();
       const result = await invoke<ExcelIntegrityResult>('check_integrity_with_excel', {
         excelPath: integrityExcelPath,
         sheetIndex: integritySheet,
@@ -561,22 +637,26 @@ export const ExcelCheck: React.FC = () => {
         templates,
         folderMatchMode: integrityFolderMatchMode,
         outputPath: outputPath || null,
+        jobId,
       });
 
       setExcelIntegrityResult(result);
 
-      if (result.truncated) {
+      if (result.cancelled) {
+        message.warning(t('excel.messages.checkCancelled'));
+      } else if (result.truncated) {
         message.warning(t('excel.messages.truncatedWarning'));
       }
       if (result.outputPath) {
         message.success(t('excel.messages.checkDoneAnnotated', { path: result.outputPath }));
-      } else {
+      } else if (!result.cancelled) {
         message.success(t('excel.messages.checkDone'));
       }
     } catch (error) {
       message.error(t('excel.messages.checkFailed', { error: mapBackendError(error) }));
     } finally {
       setChecking(false);
+      finishCheckJob();
     }
   };
 
@@ -732,7 +812,7 @@ export const ExcelCheck: React.FC = () => {
           </Space>
 
           {/* 文件树预览 */}
-          {targetFolder && !isRemote && (
+          {targetFolder && (
             <div style={{ marginTop: 8 }}>
               {scanningTree ? (
                 <Spin tip={t('excel.match.scanning')} />
@@ -740,8 +820,16 @@ export const ExcelCheck: React.FC = () => {
                 <>
                   <div style={{ marginBottom: 8 }}>
                     <Text type="secondary">
-{t('excel.match.treeSummary', { folders: matchTreeInfo?.folders ?? 0, files: matchTreeInfo?.files ?? 0 })}
+                      {t('excel.match.treeSummary', {
+                        folders: matchTreeInfo?.folders ?? 0,
+                        files: matchTreeInfo?.files ?? 0,
+                      })}
                     </Text>
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {t('excel.messages.treePreviewHint')}
+                      </Text>
+                    </div>
                   </div>
                   <Tree
                     showIcon
@@ -791,6 +879,10 @@ export const ExcelCheck: React.FC = () => {
         </Space>
       </Card>
 
+      {isRemote && (
+        <Alert type="info" showIcon message={t('excel.messages.remoteCheckHint')} />
+      )}
+
       {/* 执行按钮 */}
       <Button
         type="primary"
@@ -798,7 +890,7 @@ export const ExcelCheck: React.FC = () => {
         icon={<SearchOutlined />}
         onClick={handleMatch}
         loading={matching}
-        disabled={!excelPath || selectedColumn === null || !targetFolder}
+        disabled={!excelPath || selectedColumn === null || !targetFolder || matching || checking}
         block
       >
         {t('excel.match.startMatchExport')}
@@ -842,7 +934,9 @@ export const ExcelCheck: React.FC = () => {
             columns={matchColumns}
             rowKey="rowIndex"
             size="small"
-            pagination={{ pageSize: 10 }}
+            virtual
+                    scroll={{ y: 360 }}
+                    pagination={{ pageSize: 50, showSizeChanger: true }}
             title={() => <Text strong>{t('excel.match.missingListTitle')}</Text>}
           />
         </Card>
@@ -951,9 +1045,13 @@ export const ExcelCheck: React.FC = () => {
               </Tag>
             )}
           </Space>
+
+          {integrityIsRemote && (
+            <Alert type="info" showIcon message={t('excel.messages.remoteCheckHint')} />
+          )}
   
           {/* 文件树预览 */}
-          {integrityFolder && !integrityIsRemote && (
+          {integrityFolder && (
             <div style={{ marginTop: 8 }}>
               {scanningTree ? (
                 <Spin tip={t('excel.match.scanning')} />
@@ -961,8 +1059,16 @@ export const ExcelCheck: React.FC = () => {
                 <>
                   <div style={{ marginBottom: 8 }}>
                     <Text type="secondary">
-{t('excel.integrity.treeSummary', { folders: integrityTreeInfo?.folders ?? 0, files: integrityTreeInfo?.files ?? 0 })}
+                      {t('excel.integrity.treeSummary', {
+                        folders: integrityTreeInfo?.folders ?? 0,
+                        files: integrityTreeInfo?.files ?? 0,
+                      })}
                     </Text>
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {t('excel.messages.treePreviewHint')}
+                      </Text>
+                    </div>
                   </div>
                   <Tree
                     showIcon
@@ -1033,9 +1139,11 @@ export const ExcelCheck: React.FC = () => {
         onClick={integritySource === 'excel' ? handleExcelIntegrityCheck : handleIntegrityCheck}
         loading={checking}
         disabled={
-          integritySource === 'excel'
+          matching ||
+          checking ||
+          (integritySource === 'excel'
             ? (!integrityExcelPath || integrityNameColumn === null || !integrityFolder || templates.length === 0)
-            : (!integrityFolder || templates.length === 0)
+            : (!integrityFolder || templates.length === 0))
         }
         block
       >
@@ -1114,7 +1222,9 @@ export const ExcelCheck: React.FC = () => {
             ]}
             rowKey="rowIndex"
             size="small"
-            pagination={{ pageSize: 10 }}
+            virtual
+                    scroll={{ y: 360 }}
+                    pagination={{ pageSize: 50, showSizeChanger: true }}
             title={() => <Text strong>{t('excel.match.missingListTitle')}</Text>}
             rowClassName={(record) => (!record.isComplete ? 'row-missing' : '')}
           />
@@ -1159,7 +1269,9 @@ export const ExcelCheck: React.FC = () => {
             columns={integrityColumns}
             rowKey="folderPath"
             size="small"
-            pagination={{ pageSize: 10 }}
+            virtual
+                    scroll={{ y: 360 }}
+                    pagination={{ pageSize: 50, showSizeChanger: true }}
             rowClassName={(record) => (record.isComplete ? '' : 'row-missing')}
           />
         </Card>
@@ -1201,6 +1313,40 @@ export const ExcelCheck: React.FC = () => {
       <Title level={4} style={{ marginBottom: 16, flexShrink: 0 }}>
         <FileExcelOutlined /> {t('excel.pageTitle')}
       </Title>
+
+      {(matching || checking) && checkProgress && (
+        <Card size="small" style={{ marginBottom: 12, flexShrink: 0 }}>
+          <Space direction="vertical" style={{ width: '100%' }}>
+            <Text>
+              {i18n.exists(`excel.progress.stage.${checkProgress.stage}`)
+                ? t(`excel.progress.stage.${checkProgress.stage}`)
+                : t('excel.progress.working')}
+              {checkProgress.total > 0
+                ? ` — ${checkProgress.current} / ${checkProgress.total}`
+                : checkProgress.current > 0
+                  ? ` — ${checkProgress.current}`
+                  : ''}
+              {formatEta(checkProgress.current, checkProgress.total, progressStartedAt)
+                ? ` · ${formatEta(checkProgress.current, checkProgress.total, progressStartedAt)}`
+                : ''}
+            </Text>
+            <Progress
+              percent={
+                checkProgress.total > 0
+                  ? Math.min(99, Math.round((checkProgress.current / checkProgress.total) * 100))
+                  : checkProgress.current > 0
+                    ? 50
+                    : 10
+              }
+              status="active"
+              showInfo={checkProgress.total > 0}
+            />
+            <Button danger icon={<StopOutlined />} onClick={handleCancelCheck}>
+              {t('excel.progress.cancel')}
+            </Button>
+          </Space>
+        </Card>
+      )}
 
       <Tabs 
         items={tabItems} 
