@@ -109,16 +109,20 @@ build_windows() {
     echo -e "\n${YELLOW}开始构建...${NC}"
     npm run tauri build -- --target x86_64-pc-windows-gnu
     
-    # 复制产物到输出目录
+    # 复制产物到输出目录（兼容 CARGO_TARGET_DIR / 默认 target）
     echo -e "\n${YELLOW}复制安装包到输出目录...${NC}"
-    
-    NSIS_DIR="$PROJECT_DIR/src-tauri/target/x86_64-pc-windows-gnu/release/bundle/nsis"
-    
+
+    TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_DIR/src-tauri/target}"
+    NSIS_DIR="$TARGET_ROOT/x86_64-pc-windows-gnu/release/bundle/nsis"
+
     if ls "$NSIS_DIR"/*.exe 1> /dev/null 2>&1; then
         cp "$NSIS_DIR"/*.exe "$OUTPUT_DIR/"
         echo -e "${GREEN}  ✓ $(ls -1 "$NSIS_DIR"/*.exe | xargs -n1 basename)${NC}"
+    else
+        echo -e "${RED}未找到安装包: $NSIS_DIR${NC}"
+        exit 1
     fi
-    
+
     echo -e "\n${GREEN}Windows 构建完成！安装包已放置到: $OUTPUT_DIR/${NC}"
 }
 

@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="140" y1="60" x2="900" y2="980" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5B9BFF"/>
+      <stop offset="40%" stop-color="#2F74F0"/>
+      <stop offset="100%" stop-color="#1548C2"/>
+    </linearGradient>
+    <linearGradient id="folderBack" x1="300" y1="270" x2="720" y2="500" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F4F8FF"/>
+      <stop offset="100%" stop-color="#C9DEFF"/>
+    </linearGradient>
+    <linearGradient id="folderFront" x1="240" y1="380" x2="780" y2="820" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#EEF4FF"/>
+    </linearGradient>
+    <linearGradient id="badge" x1="600" y1="600" x2="860" y2="860" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#85E85A"/>
+      <stop offset="100%" stop-color="#2F9E1A"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Squircle plate -->
+  <rect x="72" y="72" width="880" height="880" rx="196" fill="url(#bg)"/>
+
+  <!-- Soft top gloss -->
+  <path d="M268 128c116-24 388-24 504 0 42 10 74 38 86 78v54c-48-48-146-84-338-84s-290 36-338 84v-54c12-40 44-68 86-78Z" fill="#FFFFFF" fill-opacity="0.18"/>
+
+  <!-- Folder tab / back -->
+  <path d="M292 318c0-28 22-50 50-50h148c16 0 31 8 39 22l26 44h136c28 0 50 22 50 50v48H292V318Z" fill="url(#folderBack)"/>
+
+  <!-- Folder body -->
+  <path d="M252 416c0-36 29-65 65-65h390c36 0 65 29 65 65v278c0 36-29 65-65 65H317c-36 0-65-29-65-65V416Z" fill="url(#folderFront)"/>
+
+  <!-- Checklist rows (tally) -->
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <path d="M348 508l18 18 30-34" stroke="#4C8DFF" stroke-width="18"/>
+    <rect x="416" y="502" width="220" height="24" rx="12" fill="#7EB0FF" fill-opacity="0.55"/>
+
+    <path d="M348 568l18 18 30-34" stroke="#4C8DFF" stroke-width="18"/>
+    <rect x="416" y="562" width="188" height="24" rx="12" fill="#7EB0FF" fill-opacity="0.42"/>
+
+    <path d="M348 628l18 18 30-34" stroke="#4C8DFF" stroke-width="18"/>
+    <rect x="416" y="622" width="156" height="24" rx="12" fill="#7EB0FF" fill-opacity="0.3"/>
+  </g>
+
+  <!-- Success badge -->
+  <circle cx="708" cy="696" r="118" fill="#06275A" fill-opacity="0.2"/>
+  <circle cx="708" cy="684" r="112" fill="url(#badge)"/>
+  <circle cx="708" cy="684" r="112" fill="none" stroke="#FFFFFF" stroke-opacity="0.35" stroke-width="12"/>
+  <path d="M648 686l40 40 84-90" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
