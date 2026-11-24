@@ -1,122 +1,158 @@
-# FileTally - 智能文件管理器
+# FileTally
 
-一款基于 Tauri 2.0 构建的跨平台智能文件管理工具，提供文件浏览、预览、分析、搜索及远程 NAS 传输等功能。
+跨平台智能文件管理器（Tauri 2 + React）。面向本地磁盘与局域网 NAS：浏览、预览、搜索、传输，以及对大目录 / 远程共享的智能检查与分析。
 
-## 功能特性
+[![License: LGPL-3.0](https://img.shields.io/badge/License-LGPL--3.0-blue.svg)](./LICENSE)
+[![Tauri](https://img.shields.io/badge/Tauri-2.0-FFC131?logo=tauri)](https://tauri.app/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react)](https://react.dev/)
+
+## 功能概览
+
+| 模块 | 一句话 |
+|------|--------|
+| [磁盘监控](#磁盘监控) | 本机分区容量与占用一览 |
+| [文件浏览](#文件浏览) | 本地 / NAS 树形导航 + 多格式预览 |
+| [远程连接](#远程连接) | SMB 直连或系统挂载，双模式连 NAS |
+| [智能搜索](#智能搜索) | 文件名 / 路径 / 内容检索，结果可导出 |
+| [文件传输](#文件传输) | 本地 ↔ NAS 双向批量传输与冲突处理 |
+| [智能检查](#智能检查) | Excel 名单比对 + 案卷完整性检查（支持直连 SMB） |
+| [智能分析](#智能分析) | 空间统计、清理建议、文档助手与 AI 解读 |
+| [设置与体验](#设置与体验) | 主题、语言、搜索性能与国内 AI 模型 |
+
+适合档案整理、案卷核对、局域网 NAS 日常管理等场景；大目录扫描在后台执行，带进度与取消，UI 侧有软上限避免卡死。
+
+### 磁盘监控
+
+- 自动发现本机挂载分区（含可移动磁盘）
+- 展示总容量、已用 / 可用空间与占用比例
+- 支持手动刷新，便于插拔外置盘后立刻更新
 
 ### 文件浏览
-- 树形目录导航
-- 支持本地和远程 (SMB/NAS) 文件系统
-- 文件/文件夹详细信息展示
 
-### 文件预览
-- PDF 文档预览
-- Excel 表格预览
-- Word 文档预览
-- 图片预览（JPG、PNG、GIF 等）
-- 音视频播放
-- 文本/代码文件预览
+- 树形目录：懒加载展开，不一次性拉全树
+- 同时支持本地路径与已连接的远程 NAS
+- 预览：PDF、Excel、Word、常见图片、音视频、文本 / 代码
+- 可配置默认排序（名称 / 大小 / 日期 / 类型）、是否显示隐藏文件、预览面板位置（右 / 下）
+- 大列表场景配合虚拟滚动与预览体积上限，减少内存压力
+
+### 远程连接
+
+- 面向局域网 SMB/CIFS（如群晖等 NAS）
+- **应用内直连**：不挂本地卷，Mac / Windows 行为一致，路径形如 `remote://…`
+- **系统挂载**：映射到 `/Volumes` 或 `\\主机\共享`，便于与系统文件管理器互通
+- 连接可保存、编辑、复用；在浏览、搜索、传输、智能检查中统一选用
 
 ### 智能搜索
-- 关键词搜索
-- 支持路径匹配和文件名匹配
-- 远程文件夹搜索
-- 搜索结果导出 Excel
 
-### 文件夹分析
-- 文件类型统计
-- 空间占用分析
-- AI 文档助手
-- 清理建议
+- 按文件名、路径匹配；可按需开启内容搜索（文本等）
+- 支持本地与远程目录；可多选根目录
+- 区分大小写、超时、单文件最大读取体积、并发数、搜索缓存等均可在设置中调节
+- 结果分匹配 / 未匹配视图，支持导出 Excel
 
 ### 文件传输
-- 本地 ↔ NAS 双向传输
-- 文件夹批量上传/下载
-- 文件名冲突处理（覆盖/跳过/重命名）
-- 传输进度显示
 
-### 其他
-- 磁盘空间监控
-- 深色/浅色主题切换
-- 中英文多语言支持
+- 本地 ↔ NAS 上传与下载；支持选文件或整文件夹
+- 递归传输深层目录（带深度与规模保护，避免失控）
+- 同名冲突：覆盖、跳过、重命名；文件夹覆盖时合并保留仅目标侧存在的文件
+- 传输进度与任务状态可视化
+
+### 智能检查
+
+面向「Excel 名单 ↔ 磁盘 / NAS 上实际文件」的核对，一键递归扫完全树（界面树仅预览第一层）。
+
+**Excel 比对**
+
+1. 选择工作簿与匹配列  
+2. 选择本地或远程目标文件夹  
+3. 匹配方式：精确 / 包含 / 前缀；可指定标注颜色  
+4. 导出带标注的结果表，并列出缺失项  
+
+**完整性检查（案卷）**
+
+1. 名单来自 Excel 姓名列，或从文件夹名扫描  
+2. 用 `{name}` 模板声明必需文件（如 `{name}.docx`、`{name}身份证.jpg`）  
+3. 可从文件夹名自动提取中文姓名（如 `2025-0001王宏琳` → `王宏琳`）  
+4. 输出标注 Excel 或独立检查报告  
+
+**工程能力**
+
+- 进度阶段、ETA、随时取消；取消时尽量保留已完成的部分结果  
+- 有限并行扫描；极大目录触发安全软上限并提示，正常规模扫完全部子目录  
+- **直连 SMB 也可检查**（经网络递归，大目录可能较慢，可取消）
+
+### 智能分析
+
+- **文件夹分析**：类型分布、总大小、大文件 TOP、重复文件组（启发式，删除前请人工确认）、长期未修改文件；支持本地 / 远程；可对统计结果一键 **AI 解读**（只基于统计 JSON，不读原文）
+- **清理建议**：扫描缓存、临时文件、下载残留等，估算可释放空间
+- **文档助手**：基于已配置模型对文档内容问答（需在设置中配置 API）
+
+### 设置与体验
+
+- 界面：简体中文 / English；深色 / 浅色 / 跟随系统；启动默认页
+- AI：OpenAI、Claude、Ollama，以及 DeepSeek、智谱、通义、Kimi、混元等国内厂商；可测连通性、调模型与温度
+- 搜索与性能相关开关见上文「智能搜索」
 
 ## 技术栈
 
-| 类别 | 技术 |
-|------|------|
-| 框架 | Tauri 2.0 |
-| 前端 | React 19 + TypeScript |
-| UI 组件 | Ant Design 6 |
-| 状态管理 | Zustand |
-| 后端 | Rust |
-| 国际化 | i18next |
+| 层 | 技术 |
+|----|------|
+| 桌面壳 | Tauri 2 |
+| 前端 | React 19、TypeScript、Vite、Ant Design 6、Zustand、i18next |
+| 后端 | Rust（文件系统、SMB、扫描与传输） |
 
-## 开发环境
+## 快速开始
 
-### 前置要求
-- Node.js 18+
-- Rust 1.70+
-- pnpm / npm
+**环境：** Node.js 18+、Rust 1.70+、npm（或兼容的包管理器）
 
-### 安装依赖
 ```bash
 npm install
+npm run tauri:dev          # 开发
+npm run tauri:build        # 当前平台打包
+./build.sh windows         # 或 macos / all，产物在 release/
 ```
 
-### 开发模式
-```bash
-npm run tauri dev
-```
+Windows 交叉编译示例：
 
-### 构建应用
 ```bash
-# macOS
-npm run tauri build
-
-# Windows (交叉编译)
 npm run tauri build -- --target x86_64-pc-windows-gnu
 ```
+
+安装包命名约定：
+
+| 平台 | 文件 |
+|------|------|
+| Windows | `FileTally_*_x64-setup.exe` |
+| macOS Apple Silicon | `FileTally_*_aarch64.dmg` |
+| macOS Intel | `FileTally_*_x64.dmg` |
 
 ## 项目结构
 
 ```
 FileTally/
-├── src/                    # 前端源码
-│   ├── components/         # React 组件
-│   │   ├── analysis/       # 文件夹分析
-│   │   ├── browser/        # 文件浏览器
-│   │   ├── disk/           # 磁盘监控
-│   │   ├── preview/        # 文件预览
-│   │   ├── remote/         # 远程连接
-│   │   ├── search/         # 智能搜索
-│   │   ├── settings/       # 设置
-│   │   └── transfer/       # 文件传输
-│   ├── stores/             # Zustand 状态
-│   ├── services/           # 服务层
-│   ├── i18n/               # 国际化配置
-│   └── utils/              # 工具函数
-├── src-tauri/              # Rust 后端
-│   ├── src/
-│   │   ├── commands/       # Tauri 命令
-│   │   └── lib.rs          # 入口文件
-│   └── Cargo.toml
-└── package.json
+├── src/                      # 前端
+│   ├── components/
+│   │   ├── analysis/         # 智能分析
+│   │   ├── browser/          # 文件浏览
+│   │   ├── disk/             # 磁盘监控
+│   │   ├── excel/            # Excel 智能检查
+│   │   ├── preview/          # 多格式预览
+│   │   ├── remote/           # NAS 连接
+│   │   ├── search/           # 搜索
+│   │   ├── settings/         # 设置
+│   │   └── transfer/         # 传输
+│   ├── stores/  services/  i18n/  utils/
+├── src-tauri/                # Rust
+│   └── src/commands/         # file / remote / search / transfer / excel_* / analysis …
+├── docs/                     # 设计与路线图（部分文档可能滞后于代码）
+├── build.sh                  # 跨平台构建
+└── release/                  # 构建输出
 ```
 
-## 安装包
+更细的设计说明见 [`docs/`](./docs/)。
 
-| 平台 | 文件 |
-|------|------|
-| Windows | `FileTally_x.x.x_x64-setup.exe` |
-| macOS (Apple Silicon) | `FileTally_x.x.x_aarch64.dmg` |
-| macOS (Intel) | `FileTally_x.x.x_x64.dmg` |
+## 许可证
 
-## 推荐 IDE
+本项目采用 [LGPL-3.0](./LICENSE)。
 
-- [VS Code](https://code.visualstudio.com/)
-  - [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode)
-  - [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
-
-## License
-
-[LGPL-3.0](./LICENSE)
+- 可以商用、闭源调用本库，但**对本项目本身的修改**若随程序分发，需按 LGPL 开源相应改动。
+- 完整条款以 `LICENSE` 为准。
