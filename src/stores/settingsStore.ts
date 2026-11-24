@@ -56,6 +56,10 @@ export interface AppSettings {
   // 性能设置
   maxConcurrentSearches: number;   // 最大并发搜索数
   enableSearchCache: boolean;
+  /** Transfer bandwidth cap in MB/s; 0 = unlimited */
+  transferBandwidthMBps: number;
+  /** Transfer queue concurrency (1–2) */
+  transferConcurrency: number;
   
   // AI 设置
   aiConfig: AIConfig;
@@ -91,6 +95,8 @@ const defaultSettings: AppSettings = {
   // 性能设置
   maxConcurrentSearches: 4,
   enableSearchCache: true,
+  transferBandwidthMBps: 0,
+  transferConcurrency: 1,
   
   // AI 设置
   aiConfig: {

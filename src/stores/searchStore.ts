@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import i18n from '../i18n';
 import { useSettingsStore } from './settingsStore';
 import { mapBackendError } from '../utils/backendError';
+import { makeTaskId, useTaskStore } from './taskStore';
 
 export interface SearchMatch {
   lineNumber: number;
@@ -304,9 +305,21 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     }
 
     let jobId = 0;
+    let taskId = '';
     try {
       jobId = await invoke<number>('prepare_search');
       activeSearchJobId = jobId;
+      taskId = makeTaskId('search', jobId);
+      useTaskStore.getState().upsertTask({
+        id: taskId,
+        kind: 'search',
+        title: query.trim(),
+        status: 'running',
+        backendJobId: jobId,
+        progress: { current: 0, total: 0, percentage: 0 },
+        startedAt: Date.now(),
+        cancellable: true,
+      });
     } catch (err) {
       set({ error: mapBackendError(err), statusKind: 'error', loading: false });
       return;
@@ -368,7 +381,18 @@ export const useSearchStore = create<SearchState>((set, get) => ({
         statusKind,
         error: error ? error + (response.cancelled ? truncatedHint(response.truncated) : '') : null,
       });
+      if (taskId) {
+        useTaskStore
+          .getState()
+          .completeTask(
+            taskId,
+            response.cancelled ? 'cancelled' : 'completed'
+          );
+      }
     } catch (err) {
+      if (taskId) {
+        useTaskStore.getState().completeTask(taskId, timedOut ? 'cancelled' : 'failed', mapBackendError(err));
+      }
       if (get().requestId !== requestId) return;
       set({
         error: timedOut

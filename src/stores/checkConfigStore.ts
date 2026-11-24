@@ -1,13 +1,18 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-// 完整性检查配置
+// 完整性检查 / 名单核对配置（可命名方案）
 export interface IntegrityCheckConfig {
   id: string;
   name: string;
   targetFolder: string;
   templates: string[];
   namePattern: string;
+  /** Excel match mode: exact | contains | startsWith */
+  matchMode?: string;
+  excelPath?: string;
+  matchColumn?: number;
+  kind?: 'integrity' | 'match';
   createdAt: number;
   updatedAt: number;
 }

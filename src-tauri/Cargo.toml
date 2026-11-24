@@ -60,3 +60,10 @@ calamine = "0.26"
 rust_xlsxwriter = "0.79"
 aho-corasick = "1"
 
+# Credentials / index / remote protocols
+keyring = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+ssh2 = "0.9"
+urlencoding = "2"
+

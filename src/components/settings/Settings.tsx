@@ -32,6 +32,7 @@ import {
   LoadingOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
+import { invoke } from '@tauri-apps/api/core';
 import { useSettingsStore, AIProvider, AICapability } from '../../stores';
 import { useThemeColors } from '../../hooks';
 import {
@@ -421,6 +422,32 @@ export const Settings: React.FC = () => {
                   <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
                     {t('settings.cacheHint')}
                   </Text>
+                </Form.Item>
+
+                <Form.Item label={t('settings.transferBandwidth')}>
+                  <InputNumber
+                    min={0}
+                    max={1024}
+                    value={settings.transferBandwidthMBps}
+                    onChange={(value) => {
+                      const mbps = value || 0;
+                      updateSettings({ transferBandwidthMBps: mbps });
+                      void invoke('set_transfer_bandwidth_limit', {
+                        bytesPerSec: Math.round(mbps * 1024 * 1024),
+                      }).catch(() => undefined);
+                    }}
+                    style={{ width: '100%' }}
+                  />
+                </Form.Item>
+
+                <Form.Item label={t('settings.transferConcurrency')}>
+                  <InputNumber
+                    min={1}
+                    max={2}
+                    value={settings.transferConcurrency}
+                    onChange={(value) => updateSettings({ transferConcurrency: value || 1 })}
+                    style={{ width: '100%' }}
+                  />
                 </Form.Item>
 
                 <Divider style={{ margin: '16px 0' }} />

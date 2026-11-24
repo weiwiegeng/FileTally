@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import i18n from '../i18n';
 import { mapBackendError } from '../utils/backendError';
+import { makeTaskId, useTaskStore } from './taskStore';
 
 // 传输方向
 export type TransferDirection = 'upload' | 'download';
@@ -239,6 +240,18 @@ export const useTransferStore = create<TransferState>((set, get) => ({
       return;
     }
 
+    const taskId = makeTaskId('transfer', jobId);
+    useTaskStore.getState().upsertTask({
+      id: taskId,
+      kind: 'transfer',
+      title: targetPath,
+      status: 'running',
+      backendJobId: jobId,
+      progress: { current: 0, total: sourceItems.length, percentage: 0 },
+      startedAt: Date.now(),
+      cancellable: true,
+    });
+
     set({
       transferring: true,
       activeJobId: jobId,
@@ -275,6 +288,9 @@ export const useTransferStore = create<TransferState>((set, get) => ({
         activeJobId: 0,
         progress: null,
       });
+      useTaskStore
+        .getState()
+        .completeTask(taskId, mapped.cancelled ? 'cancelled' : mapped.success ? 'completed' : 'failed');
       
       if (mapped.success) {
         set({ sourceItems: [] });
@@ -286,6 +302,7 @@ export const useTransferStore = create<TransferState>((set, get) => ({
         activeJobId: 0,
         progress: null,
       });
+      useTaskStore.getState().completeTask(taskId, 'failed', mapBackendError(err));
     }
   },
   

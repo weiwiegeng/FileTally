@@ -264,6 +264,21 @@ export const SearchPanel: React.FC = () => {
     await loadFolderContents(path);
   };
 
+  const handleIndexRoots = async () => {
+    if (searchPaths.length === 0) return;
+    try {
+      let total = 0;
+      for (const root of searchPaths) {
+        if (root.startsWith('remote://')) continue;
+        const n = await invoke<number>('index_root', { root });
+        total += n;
+      }
+      message.success(t('search.panel.indexDone', { count: total }));
+    } catch (e) {
+      message.error(mapBackendError(e));
+    }
+  };
+
   const handleSearch = () => {
     if (selectedFileTypes) {
       setOptions({ file_extensions: selectedFileTypes.split(',') });
@@ -424,6 +439,12 @@ export const SearchPanel: React.FC = () => {
           >
             {mode === 'normal' ? t('search.panel.actionSearch') : t('search.panel.actionCheck')}
           </Button>
+
+          <Tooltip title={t('search.panel.indexTooltip')}>
+            <Button onClick={() => void handleIndexRoots()} disabled={searchPaths.length === 0}>
+              {t('search.panel.index')}
+            </Button>
+          </Tooltip>
 
           {loading && (
             <Button danger onClick={() => cancelSearch()}>

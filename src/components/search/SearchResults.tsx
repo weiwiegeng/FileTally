@@ -12,6 +12,7 @@ import {
   Tabs,
   Badge,
   Table,
+  Select,
 } from 'antd';
 import {
   FileTextOutlined,
@@ -329,6 +330,11 @@ export const SearchResults: React.FC = () => {
     unmatchedCount,
   } = useSearchStore();
   const [activeTab, setActiveTab] = useState('matched');
+  const [typeFilter, setTypeFilter] = useState<string>('all');
+  const filteredResults =
+    typeFilter === 'all'
+      ? results
+      : results.filter((r) => r.fileType === typeFilter || r.fileName.toLowerCase().endsWith(`.${typeFilter}`));
 
   if (loading) {
     return (
@@ -441,7 +447,21 @@ export const SearchResults: React.FC = () => {
       ),
       children: (
         <div style={{ padding: '0 24px', overflow: 'auto', height: 'calc(100vh - 320px)' }}>
-          {results.length === 0 ? (
+          <Select
+            size="small"
+            value={typeFilter}
+            onChange={setTypeFilter}
+            style={{ width: 160, marginBottom: 8 }}
+            options={[
+              { value: 'all', label: t('search.panel.filterAllTypes') },
+              { value: 'pdf', label: 'PDF' },
+              { value: 'text', label: t('search.panel.fileTypeText') },
+              { value: 'excel', label: 'Excel' },
+              { value: 'word', label: 'Word' },
+              { value: 'image', label: t('search.panel.fileTypeImage') },
+            ]}
+          />
+          {filteredResults.length === 0 ? (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
               description={
@@ -456,7 +476,7 @@ export const SearchResults: React.FC = () => {
             />
           ) : (
             <List
-              dataSource={results}
+              dataSource={filteredResults}
               renderItem={(result) => (
                 <List.Item style={{ padding: '8px 0', border: 'none' }}>
                   <div style={{ width: '100%' }}>

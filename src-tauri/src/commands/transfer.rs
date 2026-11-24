@@ -57,8 +57,30 @@ pub struct TransferProgress {
     pub current_file: String,
     pub current_index: u64,
     pub total_files: u64,
+    pub bytes_transferred: u64,
+    pub total_bytes: u64,
     pub stage: String, // "counting" | "transferring" | "cancelled"
     pub message: String,
+}
+
+/// Global soft bandwidth cap (bytes/sec). 0 = unlimited.
+static TRANSFER_BANDWIDTH_BPS: AtomicU64 = AtomicU64::new(0);
+
+#[tauri::command]
+pub fn set_transfer_bandwidth_limit(bytes_per_sec: u64) -> Result<(), String> {
+    TRANSFER_BANDWIDTH_BPS.store(bytes_per_sec, Ordering::SeqCst);
+    Ok(())
+}
+
+fn throttle_after_chunk(chunk_len: usize) {
+    let bps = TRANSFER_BANDWIDTH_BPS.load(Ordering::SeqCst);
+    if bps == 0 || chunk_len == 0 {
+        return;
+    }
+    let nanos = (chunk_len as u128) * 1_000_000_000u128 / (bps as u128);
+    if nanos > 0 {
+        std::thread::sleep(std::time::Duration::from_nanos(nanos.min(u64::MAX as u128) as u64));
+    }
 }
 
 /// 路径信息
@@ -295,6 +317,7 @@ fn copy_file_cancellable(src: &Path, dst: &Path, job_id: u64) -> std::io::Result
                 break;
             }
             writer.write_all(&buf[..n])?;
+            throttle_after_chunk(n);
         }
         writer.flush()?;
         Ok(())
@@ -716,6 +739,8 @@ fn transfer_files_sync(
             current_file: String::new(),
             current_index: 0,
             total_files: 0,
+            bytes_transferred: 0,
+            total_bytes: 0,
             stage: "counting".to_string(),
             message: String::new(),
         },
@@ -842,6 +867,8 @@ fn transfer_files_sync(
                     current_file: file_name.clone(),
                     current_index: current,
                     total_files,
+                    bytes_transferred: 0,
+                    total_bytes: 0,
                     stage: "transferring".to_string(),
                     message: String::new(),
                 },
@@ -961,6 +988,8 @@ fn transfer_files_sync(
                 current_file: String::new(),
                 current_index: processed.load(Ordering::SeqCst),
                 total_files,
+                bytes_transferred: 0,
+                total_bytes: 0,
                 stage: "cancelled".to_string(),
                 message: String::new(),
             },
@@ -1200,6 +1229,8 @@ fn copy_dir_recursive_with_progress(
                     current_file: file_name,
                     current_index: current,
                     total_files,
+                    bytes_transferred: 0,
+                    total_bytes: 0,
                     stage: "transferring".to_string(),
                     message: String::new(),
                 },

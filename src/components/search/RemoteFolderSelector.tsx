@@ -54,6 +54,8 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
   const [subPath, setSubPath] = useState('');
   const [checking, setChecking] = useState(false);
   const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [remoteEntries, setRemoteEntries] = useState<{ name: string; path: string; isDir: boolean }[]>([]);
+  const [browsingRemote, setBrowsingRemote] = useState(false);
 
   useEffect(() => {
     if (!isOpen) {
@@ -96,7 +98,18 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
 
     const basePath = getMountPath(live);
     if (basePath.startsWith('remote://')) {
-      message.info(t('search.remoteFolderSelector.directSubdirHint'));
+      setBrowsingRemote(true);
+      try {
+        const current = subPath ? joinRemoteSubpath(basePath, subPath) : basePath;
+        const entries = await invoke<{ name: string; path: string; isDir: boolean }[]>(
+          'list_remote_dir',
+          { path: current }
+        );
+        setRemoteEntries(entries.filter((e) => e.isDir));
+      } catch (err) {
+        message.error(mapBackendErrorMessage(err));
+        setBrowsingRemote(false);
+      }
       return;
     }
 
@@ -115,6 +128,11 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
     } catch (err) {
       console.error('select directory failed:', err);
     }
+  };
+
+  const mapBackendErrorMessage = (err: unknown) => {
+    const raw = err instanceof Error ? err.message : String(err);
+    return raw;
   };
 
   const handleConfirm = async () => {
@@ -263,14 +281,37 @@ export const RemoteFolderSelector: React.FC<RemoteFolderSelectorProps> = ({
               onChange={(e) => setSubPath(e.target.value)}
               prefix={<FolderOutlined />}
             />
-            <Button
-              icon={<SearchOutlined />}
-              onClick={handleSelectSubFolder}
-              disabled={getMountPath(selectedConnection).startsWith('remote://')}
-            >
+            <Button icon={<SearchOutlined />} onClick={() => void handleSelectSubFolder()}>
               {t('search.remoteFolderSelector.browse')}
             </Button>
           </Space.Compact>
+
+          {browsingRemote && (
+            <List
+              size="small"
+              style={{ maxHeight: 180, overflow: 'auto', marginBottom: 12 }}
+              dataSource={remoteEntries}
+              locale={{ emptyText: '—' }}
+              renderItem={(item) => (
+                <List.Item
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => {
+                    const base = getMountPath(selectedConnection);
+                    const root = base.endsWith('/') ? base.slice(0, -1) : base;
+                    const next = item.path.startsWith('remote://')
+                      ? item.path
+                      : `${root}/${item.name}`;
+                    const rel = next.replace(root + '/', '').replace(root, '');
+                    setSubPath(rel);
+                    setBrowsingRemote(false);
+                  }}
+                >
+                  <FolderOutlined style={{ marginRight: 8 }} />
+                  {item.name}
+                </List.Item>
+              )}
+            />
+          )}
 
           <div
             style={{

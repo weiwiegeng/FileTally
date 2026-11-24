@@ -7,6 +7,30 @@ use walkdir::WalkDir;
 use regex::RegexBuilder;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
+use tauri::{AppHandle, Emitter};
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchProgress {
+    pub job_id: u64,
+    pub stage: String,
+    pub current: u64,
+    pub total: u64,
+    pub message: String,
+}
+
+fn emit_search_progress(app: &AppHandle, job_id: u64, stage: &str, current: u64, total: u64, message: &str) {
+    let _ = app.emit(
+        "search-progress",
+        SearchProgress {
+            job_id,
+            stage: stage.to_string(),
+            current,
+            total,
+            message: message.to_string(),
+        },
+    );
+}
 
 /// Per-job cancel: cancel only affects the job id that was current when cancel was called.
 static SEARCH_JOB_ID: AtomicU64 = AtomicU64::new(0);
@@ -338,12 +362,19 @@ fn search_single_file(
 
 #[tauri::command]
 pub async fn search_files(
+    app: AppHandle,
     store: tauri::State<'_, std::sync::Arc<crate::commands::remote::SmbSessionStore>>,
     paths: Vec<String>,
     query: String,
     options: SearchOptions,
     job_id: Option<u64>,
 ) -> Result<SearchResponse, String> {
+    let resolved_job = match job_id {
+        Some(id) if id > 0 => id,
+        _ => begin_search_job(),
+    };
+    emit_search_progress(&app, resolved_job, "scanning", 0, 0, &query);
+
     let mut remote_paths = Vec::new();
     let mut local_paths = Vec::new();
     for p in paths {
@@ -361,10 +392,11 @@ pub async fn search_files(
     let mut truncated = false;
 
     if !local_paths.is_empty() {
+        let app2 = app.clone();
         let local = tokio::task::spawn_blocking({
             let query = query.clone();
             let options = options.clone();
-            move || search_files_sync(local_paths, query, options, job_id)
+            move || search_files_sync(app2, local_paths, query, options, Some(resolved_job))
         })
         .await
         .map_err(|e| crate::err::with_detail("analysis_task_failed", e))??;
@@ -387,6 +419,15 @@ pub async fn search_files(
     if total_scanned == 0 && matched.is_empty() && unmatched.is_empty() {
         return Err(crate::err::code("search_need_paths"));
     }
+
+    emit_search_progress(
+        &app,
+        resolved_job,
+        if cancelled { "cancelled" } else { "done" },
+        total_scanned as u64,
+        total_scanned as u64,
+        &query,
+    );
 
     Ok(SearchResponse {
         matched,
@@ -536,6 +577,7 @@ async fn search_remote_paths(
 }
 
 fn search_files_sync(
+    app: AppHandle,
     paths: Vec<String>,
     query: String,
     options: SearchOptions,
@@ -593,6 +635,16 @@ fn search_files_sync(
                 }
             }
             files_to_search.push(entry_path.to_path_buf());
+            if files_to_search.len() % 200 == 0 {
+                emit_search_progress(
+                    &app,
+                    job_id,
+                    "scanning",
+                    files_to_search.len() as u64,
+                    0,
+                    &query,
+                );
+            }
             // CAP+1 sentinel: exact-CAP trees are not falsely marked truncated.
             if files_to_search.len() > SEARCH_FILE_CAP {
                 files_to_search.truncate(SEARCH_FILE_CAP);

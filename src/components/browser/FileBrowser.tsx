@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Button, Typography, Space, Switch, Select, Dropdown, Tag, Tooltip, Alert } from 'antd';
+import { Button, Typography, Space, Switch, Select, Dropdown, Tag, Tooltip, Alert, Tabs } from 'antd';
 import {
   FolderOpenOutlined,
   EyeOutlined,
@@ -7,13 +7,17 @@ import {
   SortAscendingOutlined,
   CloudServerOutlined,
   DownOutlined,
-  CloseOutlined,
   ClearOutlined,
   HomeOutlined,
+  StarOutlined,
+  StarFilled,
+  UnorderedListOutlined,
+  ApartmentOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useFileStore, useSettingsStore, useRemoteStore } from '../../stores';
+import { useFileStore, useSettingsStore, useRemoteStore, usePlacesStore } from '../../stores';
 import { FileTree } from './FileTree';
+import { FileListView } from './FileListView';
 import { FilePreview } from './FilePreview';
 import { useThemeColors } from '../../hooks';
 import { RemoteFolderSelector } from '../search/RemoteFolderSelector';
@@ -37,13 +41,30 @@ export const FileBrowser: React.FC = () => {
     sortOrder, 
     setSortField, 
     setSortOrder,
+    setViewMode,
+    viewMode,
     error,
   } = useFileStore();
   const { settings } = useSettingsStore();
   const { connections } = useRemoteStore();
+  const { favorites, recent, addFavorite, removeFavorite, isFavorite, pushRecent } = usePlacesStore();
   const colors = useThemeColors();
   const initializedRef = useRef(false);
   const [showRemoteSelector, setShowRemoteSelector] = useState(false);
+  const [activeTabPath, setActiveTabPath] = useState<string | undefined>();
+
+  useEffect(() => {
+    if (currentPaths.length && !activeTabPath) {
+      setActiveTabPath(currentPaths[0]);
+    }
+    if (activeTabPath && !currentPaths.includes(activeTabPath)) {
+      setActiveTabPath(currentPaths[0]);
+    }
+  }, [currentPaths, activeTabPath]);
+
+  useEffect(() => {
+    currentPaths.forEach((p) => pushRecent(p));
+  }, [currentPaths.join('|')]);
 
   // 初次加载 + 设置变更时同步
   useEffect(() => {
@@ -122,6 +143,32 @@ export const FileBrowser: React.FC = () => {
               ]}
             />
           </Space>
+          <Select
+            size="small"
+            value={viewMode === 'list' ? 'list' : 'tree'}
+            style={{ width: 110 }}
+            onChange={(v) => setViewMode(v === 'list' ? 'list' : 'tree')}
+            options={[
+              {
+                value: 'tree',
+                label: (
+                  <Space>
+                    <ApartmentOutlined />
+                    {t('browser.fileBrowser.viewTree')}
+                  </Space>
+                ),
+              },
+              {
+                value: 'list',
+                label: (
+                  <Space>
+                    <UnorderedListOutlined />
+                    {t('browser.fileBrowser.viewList')}
+                  </Space>
+                ),
+              },
+            ]}
+          />
           <Space size="small">
             {showHidden ? (
               <EyeOutlined style={{ color: colors.accentBlue }} />
@@ -137,6 +184,22 @@ export const FileBrowser: React.FC = () => {
               onChange={handleShowHiddenChange}
             />
           </Space>
+          {activeTabPath && (
+            <Button
+              size="small"
+              icon={isFavorite(activeTabPath) ? <StarFilled /> : <StarOutlined />}
+              onClick={() => {
+                if (isFavorite(activeTabPath)) {
+                  const fav = favorites.find((f) => f.path === activeTabPath);
+                  if (fav) removeFavorite(fav.id);
+                } else {
+                  addFavorite(activeTabPath);
+                }
+              }}
+            >
+              {t('places.addFavorite')}
+            </Button>
+          )}
           {currentPaths.length > 0 && (
             <Button
               size="small"
@@ -186,34 +249,62 @@ export const FileBrowser: React.FC = () => {
         </Space>
       </div>
 
-      {/* 已选文件夹列表 */}
-      {currentPaths.length > 0 && (
+      {(favorites.length > 0 || recent.length > 0) && (
         <div
           style={{
-            padding: '8px 24px',
+            padding: '6px 24px',
             borderBottom: `1px solid ${colors.border}`,
-            background: colors.bgSecondary,
             display: 'flex',
-            flexWrap: 'wrap',
             gap: 8,
+            flexWrap: 'wrap',
+            alignItems: 'center',
           }}
         >
-          <Text type="secondary" style={{ lineHeight: '24px' }}>{t('browser.fileBrowser.selectedDirs', { count: currentPaths.length })}</Text>
-          {currentPaths.map((path) => (
+          {favorites.slice(0, 8).map((f) => (
             <Tag
-              key={path}
-              color={isRemotePath(path) ? 'purple' : 'blue'}
-              closable
-              onClose={() => removePath(path)}
-              style={{ margin: 0 }}
+              key={f.id}
+              color="gold"
+              style={{ cursor: 'pointer' }}
+              onClick={() => void addPath(f.path)}
             >
-              <Tooltip title={path}>
-                {isRemotePath(path) ? <CloudServerOutlined style={{ marginRight: 4 }} /> : <FolderOpenOutlined style={{ marginRight: 4 }} />}
-                {getFolderName(path)}
-              </Tooltip>
+              <StarFilled /> {f.label}
+            </Tag>
+          ))}
+          {recent.slice(0, 5).map((r) => (
+            <Tag
+              key={r.id}
+              style={{ cursor: 'pointer' }}
+              onClick={() => void addPath(r.path)}
+            >
+              {r.label}
             </Tag>
           ))}
         </div>
+      )}
+
+      {currentPaths.length > 0 && (
+        <Tabs
+          type="editable-card"
+          hideAdd
+          size="small"
+          activeKey={activeTabPath}
+          onChange={setActiveTabPath}
+          onEdit={(key, action) => {
+            if (action === 'remove' && typeof key === 'string') removePath(key);
+          }}
+          style={{ padding: '0 16px', marginBottom: 0 }}
+          items={currentPaths.map((path) => ({
+            key: path,
+            label: (
+              <Tooltip title={path}>
+                <span>
+                  {isRemotePath(path) ? <CloudServerOutlined style={{ marginRight: 4 }} /> : null}
+                  {getFolderName(path)}
+                </span>
+              </Tooltip>
+            ),
+          }))}
+        />
       )}
 
       {error && (
@@ -250,7 +341,7 @@ export const FileBrowser: React.FC = () => {
           }}
         >
           {currentPaths.length > 0 ? (
-            <FileTree />
+            viewMode === 'list' ? <FileListView /> : <FileTree />
           ) : (
             <div
               style={{

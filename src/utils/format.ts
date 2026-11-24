@@ -103,6 +103,8 @@ export function getPathName(path: string): string {
  */
 export function isRemotePath(path: string): boolean {
   if (!path) return false;
+  // In-app direct SMB
+  if (path.startsWith('remote://')) return true;
   // macOS mounted volumes
   if (path.startsWith('/Volumes/')) return true;
   // Windows UNC paths

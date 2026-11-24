@@ -8,12 +8,12 @@ use tauri::AppHandle;
 use super::excel_runtime::{
     emit_progress, is_cancelled, PER_FOLDER_ENTRY_SOFT_CAP, SCAN_ENTRY_SOFT_CAP,
 };
-use super::remote::SmbSessionStore;
+use super::remote::{RemoteSession, RemoteSessionStore, SmbSessionStore};
 use crate::path_util::{join_remote_path, parse_remote_path};
 
 /// Recursively walk remote dir; push `(remote_path, size, is_dir)`. Honors cancel + soft cap.
 async fn walk_remote_cancellable(
-    store: &SmbSessionStore,
+    store: &RemoteSessionStore,
     conn_id: &str,
     rel: &str,
     out: &mut Vec<(String, u64, bool)>,
@@ -31,11 +31,16 @@ async fn walk_remote_cancellable(
         let session = guard
             .get_mut(conn_id)
             .ok_or_else(|| crate::err::code("smb_session_missing"))?;
-        session
-            .client
-            .list_directory(&mut session.share, rel)
-            .await
-            .map_err(super::remote::map_smb_err)?
+        match session {
+            RemoteSession::Smb(s) => s
+                .client
+                .list_directory(&mut s.share, rel)
+                .await
+                .map_err(super::remote::map_smb_err)?,
+            RemoteSession::WebDav { .. } | RemoteSession::Sftp(_) => {
+                return Err(crate::err::code("remote_protocol_mismatch"));
+            }
+        }
     };
 
     for e in entries {

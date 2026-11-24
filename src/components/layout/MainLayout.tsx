@@ -1,5 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Layout, Menu, Typography, ConfigProvider, theme } from 'antd';
+import zhCNAntd from 'antd/locale/zh_CN';
+import enUSAntd from 'antd/locale/en_US';
 import {
   DatabaseOutlined,
   FolderOutlined,
@@ -9,6 +11,10 @@ import {
   SettingOutlined,
   UploadOutlined,
   FileExcelOutlined,
+  UnorderedListOutlined,
+  FilterOutlined,
+  RetweetOutlined,
+  SwapOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { DiskOverview } from '../disk';
@@ -19,12 +25,28 @@ import { Settings } from '../settings';
 import { AIAnalysis } from '../analysis';
 import { FileTransfer } from '../transfer';
 import { ExcelCheck } from '../excel';
-import { useSettingsStore } from '../../stores';
+import { TaskCenter, TaskBridge } from '../tasks';
+import { RuleFilter } from '../rules';
+import { OrganizePanel } from '../organize';
+import { SyncPanel } from '../sync';
+import { useSettingsStore, useTaskStore } from '../../stores';
 
 const { Sider, Content } = Layout;
 const { Title } = Typography;
 
-type MenuKey = 'disk' | 'browser' | 'remote' | 'filter' | 'transfer' | 'excel' | 'ai' | 'settings';
+type MenuKey =
+  | 'disk'
+  | 'browser'
+  | 'remote'
+  | 'filter'
+  | 'transfer'
+  | 'excel'
+  | 'ai'
+  | 'tasks'
+  | 'rules'
+  | 'organize'
+  | 'sync'
+  | 'settings';
 
 const getSystemPrefersDark = () =>
   typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -34,9 +56,26 @@ export const MainLayout: React.FC = () => {
   const { t, i18n } = useTranslation();
   const [systemDark, setSystemDark] = useState(getSystemPrefersDark);
 
+  const activeTaskCount = useTaskStore((s) =>
+    s.tasks.filter((t) => t.status === 'running' || t.status === 'queued').length
+  );
+
   const resolveDefaultPage = (page: string): MenuKey => {
     if (page === 'search') return 'filter';
-    const allowed: MenuKey[] = ['disk', 'browser', 'remote', 'filter', 'transfer', 'excel', 'ai', 'settings'];
+    const allowed: MenuKey[] = [
+      'disk',
+      'browser',
+      'remote',
+      'filter',
+      'transfer',
+      'excel',
+      'ai',
+      'tasks',
+      'rules',
+      'organize',
+      'sync',
+      'settings',
+    ];
     return (allowed as string[]).includes(page) ? (page as MenuKey) : 'disk';
   };
 
@@ -70,44 +109,51 @@ export const MainLayout: React.FC = () => {
     [isDark]
   );
 
+  const antdLocale = settings.language === 'zh-CN' ? zhCNAntd : enUSAntd;
+
   const menuItems = [
     {
-      key: 'disk',
-      icon: <DatabaseOutlined />,
-      label: t('menu.diskMonitor'),
+      type: 'group' as const,
+      label: t('menu.groupDaily'),
+      children: [
+        { key: 'disk', icon: <DatabaseOutlined />, label: t('menu.diskMonitor') },
+        { key: 'browser', icon: <FolderOutlined />, label: t('menu.fileBrowser') },
+        { key: 'remote', icon: <CloudServerOutlined />, label: t('menu.remoteConnect') },
+      ],
     },
     {
-      key: 'browser',
-      icon: <FolderOutlined />,
-      label: t('menu.fileBrowser'),
+      type: 'group' as const,
+      label: t('menu.groupFind'),
+      children: [
+        { key: 'filter', icon: <SearchOutlined />, label: t('menu.smartSearch') },
+        { key: 'transfer', icon: <UploadOutlined />, label: t('menu.fileTransfer') },
+      ],
     },
     {
-      key: 'remote',
-      icon: <CloudServerOutlined />,
-      label: t('menu.remoteConnect'),
+      type: 'group' as const,
+      label: t('menu.groupTools'),
+      children: [
+        { key: 'rules', icon: <FilterOutlined />, label: t('menu.rules') },
+        { key: 'organize', icon: <RetweetOutlined />, label: t('menu.organize') },
+        { key: 'sync', icon: <SwapOutlined />, label: t('menu.sync') },
+      ],
     },
     {
-      key: 'filter',
-      icon: <SearchOutlined />,
-      label: t('menu.smartSearch'),
+      type: 'group' as const,
+      label: t('menu.groupSmart'),
+      children: [
+        { key: 'excel', icon: <FileExcelOutlined />, label: t('menu.excelCheck') },
+        { key: 'ai', icon: <RobotOutlined />, label: t('menu.aiAnalysis') },
+      ],
     },
+    { type: 'divider' as const },
     {
-      key: 'transfer',
-      icon: <UploadOutlined />,
-      label: t('menu.fileTransfer'),
-    },
-    {
-      key: 'excel',
-      icon: <FileExcelOutlined />,
-      label: t('menu.excelCheck'),
-    },
-    {
-      key: 'ai',
-      icon: <RobotOutlined />,
-      label: t('menu.aiAnalysis'),
-    },
-    {
-      type: 'divider' as const,
+      key: 'tasks',
+      icon: <UnorderedListOutlined />,
+      label:
+        activeTaskCount > 0
+          ? `${t('menu.tasks')} (${activeTaskCount})`
+          : t('menu.tasks'),
     },
     {
       key: 'settings',
@@ -132,6 +178,14 @@ export const MainLayout: React.FC = () => {
         return <ExcelCheck />;
       case 'ai':
         return <AIAnalysis />;
+      case 'rules':
+        return <RuleFilter />;
+      case 'organize':
+        return <OrganizePanel />;
+      case 'sync':
+        return <SyncPanel />;
+      case 'tasks':
+        return <TaskCenter />;
       case 'settings':
         return <Settings />;
       default:
@@ -168,6 +222,7 @@ export const MainLayout: React.FC = () => {
 
   return (
     <ConfigProvider
+      locale={antdLocale}
       theme={{
         algorithm: themeAlgorithm,
         token: {
@@ -181,12 +236,17 @@ export const MainLayout: React.FC = () => {
       }}
     >
       <Layout style={{ minHeight: '100vh', background: bgColors.primary }}>
+        <TaskBridge />
         {/* Sidebar */}
         <Sider
           width={220}
           style={{
             background: bgColors.sider,
             borderRight: `1px solid ${bgColors.border}`,
+            height: '100vh',
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
           }}
         >
           {/* Logo */}
@@ -197,6 +257,7 @@ export const MainLayout: React.FC = () => {
               display: 'flex',
               alignItems: 'center',
               gap: 10,
+              flexShrink: 0,
             }}
           >
             <div
@@ -223,17 +284,19 @@ export const MainLayout: React.FC = () => {
           </div>
 
           {/* Menu */}
-          <Menu
-            mode="inline"
-            selectedKeys={[activeMenu]}
-            onClick={({ key }) => setActiveMenu(key as MenuKey)}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              marginTop: 8,
-            }}
-            items={menuItems}
-          />
+          <div style={{ flex: 1, overflow: 'auto', paddingBottom: 12 }}>
+            <Menu
+              mode="inline"
+              selectedKeys={[activeMenu]}
+              onClick={({ key }) => setActiveMenu(key as MenuKey)}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                marginTop: 4,
+              }}
+              items={menuItems}
+            />
+          </div>
         </Sider>
 
         {/* Main Content */}

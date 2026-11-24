@@ -1,4 +1,4 @@
-//! Remote NAS connectivity: system SMB mount + in-app SMB2 sessions.
+//! Remote NAS connectivity: SMB, WebDAV, and SFTP in-app sessions.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,12 +14,18 @@ use tokio::sync::Mutex;
 use crate::err;
 use crate::path_util::{self, join_remote_path, parse_remote_path};
 
-/// In-memory SMB sessions keyed by frontend connection id.
-pub struct SmbSessionStore {
-    pub(crate) inner: Mutex<HashMap<String, SmbSession>>,
+use super::remote_sftp::{connect_sftp as open_sftp, walk_sftp_files, SftpSession};
+use super::remote_webdav::{connect_webdav as open_webdav, walk_webdav_files, WebDavSession};
+
+/// In-memory remote sessions keyed by frontend connection id.
+pub struct RemoteSessionStore {
+    pub(crate) inner: Mutex<HashMap<String, RemoteSession>>,
 }
 
-impl Default for SmbSessionStore {
+/// Back-compat alias for existing call sites.
+pub type SmbSessionStore = RemoteSessionStore;
+
+impl Default for RemoteSessionStore {
     fn default() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
@@ -27,10 +33,24 @@ impl Default for SmbSessionStore {
     }
 }
 
+pub enum RemoteSession {
+    Smb(SmbSession),
+    WebDav {
+        inner: WebDavSession,
+        username: String,
+        password: String,
+    },
+    Sftp(SftpSession),
+}
+
 pub(crate) struct SmbSession {
     pub(crate) client: SmbClient,
     pub(crate) share: smb2::Tree,
     pub(crate) share_name: String,
+}
+
+fn session_missing() -> String {
+    err::code("remote_session_missing")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -262,7 +282,7 @@ pub async fn connect_system_smb(
 /// Connect in-app SMB session (direct mode).
 #[tauri::command]
 pub async fn connect_smb(
-    store: State<'_, Arc<SmbSessionStore>>,
+    store: State<'_, Arc<RemoteSessionStore>>,
     connection_id: String,
     host: String,
     share: String,
@@ -292,52 +312,201 @@ pub async fn connect_smb(
     let mut guard = store.inner.lock().await;
     guard.insert(
         connection_id.clone(),
-        SmbSession {
+        RemoteSession::Smb(SmbSession {
             client,
             share: tree,
             share_name: share,
-        },
+        }),
     );
 
     Ok(join_remote_path(&connection_id, ""))
 }
 
+/// Connect in-app WebDAV session (direct mode).
+#[tauri::command]
+pub async fn connect_webdav(
+    store: State<'_, Arc<RemoteSessionStore>>,
+    connection_id: String,
+    base_url: String,
+    username: String,
+    password: String,
+    label: Option<String>,
+    timeout_ms: Option<u64>,
+) -> Result<String, String> {
+    if connection_id.trim().is_empty() || base_url.trim().is_empty() {
+        return Err(err::code("webdav_params_missing"));
+    }
+    let inner = open_webdav(
+        &base_url,
+        &username,
+        &password,
+        label.as_deref().unwrap_or("WebDAV"),
+        timeout_ms.unwrap_or(30_000),
+    )
+    .await?;
+    let mut guard = store.inner.lock().await;
+    guard.insert(
+        connection_id.clone(),
+        RemoteSession::WebDav {
+            inner,
+            username,
+            password,
+        },
+    );
+    Ok(join_remote_path(&connection_id, ""))
+}
+
+/// Connect in-app SFTP session (direct mode).
+#[tauri::command]
+pub async fn connect_sftp(
+    store: State<'_, Arc<RemoteSessionStore>>,
+    connection_id: String,
+    host: String,
+    port: Option<u16>,
+    username: String,
+    password: String,
+    root: Option<String>,
+    label: Option<String>,
+) -> Result<String, String> {
+    if connection_id.trim().is_empty() || host.trim().is_empty() || username.trim().is_empty() {
+        return Err(err::code("sftp_params_missing"));
+    }
+    let session = open_sftp(
+        host.trim(),
+        port.unwrap_or(22),
+        username.trim(),
+        &password,
+        root.as_deref().unwrap_or("/"),
+        label.as_deref().unwrap_or("SFTP"),
+    )?;
+    let mut guard = store.inner.lock().await;
+    guard.insert(connection_id.clone(), RemoteSession::Sftp(session));
+    Ok(join_remote_path(&connection_id, ""))
+}
+
 #[tauri::command]
 pub async fn disconnect_smb(
-    store: State<'_, Arc<SmbSessionStore>>,
+    store: State<'_, Arc<RemoteSessionStore>>,
     connection_id: String,
 ) -> Result<(), String> {
     let mut guard = store.inner.lock().await;
-    if let Some(mut session) = guard.remove(&connection_id) {
-        let _ = session.client.disconnect_share(&session.share).await;
+    if let Some(session) = guard.remove(&connection_id) {
+        if let RemoteSession::Smb(mut s) = session {
+            let _ = s.client.disconnect_share(&s.share).await;
+        }
     }
     Ok(())
 }
 
+/// Disconnect any remote session type.
+#[tauri::command]
+pub async fn disconnect_remote(
+    store: State<'_, Arc<RemoteSessionStore>>,
+    connection_id: String,
+) -> Result<(), String> {
+    disconnect_smb(store, connection_id).await
+}
+
 pub async fn list_remote_dir_inner(
-    store: &SmbSessionStore,
+    store: &RemoteSessionStore,
     path: &str,
 ) -> Result<Vec<RemoteDirEntry>, String> {
     path_util::validate_user_path(path)?;
     let (conn_id, rel) = parse_remote_path(path)?;
 
     let mut guard = store.inner.lock().await;
-    let session = guard
-        .get_mut(&conn_id)
-        .ok_or_else(|| err::code("smb_session_missing"))?;
+    match guard.get_mut(&conn_id) {
+        Some(RemoteSession::Smb(session)) => {
+            let entries = session
+                .client
+                .list_directory(&mut session.share, &rel)
+                .await
+                .map_err(map_smb_err)?;
+            Ok(entries_to_remote(&conn_id, &rel, &entries))
+        }
+        Some(RemoteSession::WebDav {
+            inner,
+            username,
+            password,
+        }) => {
+            let inner = inner.clone();
+            let username = username.clone();
+            let password = password.clone();
+            drop(guard);
+            let entries = super::remote_webdav::webdav_list_dir(&inner, &rel, &username, &password).await?;
+            Ok(simple_entries_to_remote(&conn_id, &rel, &entries))
+        }
+        Some(RemoteSession::Sftp(session)) => {
+            let entries = super::remote_sftp::sftp_list_dir(session, &rel)?;
+            Ok(sftp_entries_to_remote(&conn_id, &rel, &entries))
+        }
+        None => Err(session_missing()),
+    }
+}
 
-    let entries = session
-        .client
-        .list_directory(&mut session.share, &rel)
-        .await
-        .map_err(map_smb_err)?;
+fn simple_entries_to_remote(
+    conn_id: &str,
+    parent_rel: &str,
+    entries: &[super::remote_webdav::WebDavEntry],
+) -> Vec<RemoteDirEntry> {
+    let mut out: Vec<RemoteDirEntry> = entries
+        .iter()
+        .map(|e| {
+            let child_rel = if parent_rel.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{parent_rel}/{}", e.name)
+            };
+            RemoteDirEntry {
+                name: e.name.clone(),
+                path: join_remote_path(conn_id, &child_rel),
+                is_dir: e.is_dir,
+                size: e.size,
+                size_formatted: format_size(e.size),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+    out
+}
 
-    Ok(entries_to_remote(&conn_id, &rel, &entries))
+fn sftp_entries_to_remote(
+    conn_id: &str,
+    parent_rel: &str,
+    entries: &[super::remote_sftp::SftpEntry],
+) -> Vec<RemoteDirEntry> {
+    let mut out: Vec<RemoteDirEntry> = entries
+        .iter()
+        .map(|e| {
+            let child_rel = if parent_rel.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{parent_rel}/{}", e.name)
+            };
+            RemoteDirEntry {
+                name: e.name.clone(),
+                path: join_remote_path(conn_id, &child_rel),
+                is_dir: e.is_dir,
+                size: e.size,
+                size_formatted: format_size(e.size),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+    out
 }
 
 #[tauri::command]
 pub async fn list_remote_dir(
-    store: State<'_, Arc<SmbSessionStore>>,
+    store: State<'_, Arc<RemoteSessionStore>>,
     path: String,
 ) -> Result<Vec<RemoteDirEntry>, String> {
     list_remote_dir_inner(store.as_ref(), &path).await
@@ -372,7 +541,7 @@ fn entries_to_remote(conn_id: &str, parent_rel: &str, entries: &[DirectoryEntry]
 }
 
 pub async fn remote_path_exists_inner(
-    store: &SmbSessionStore,
+    store: &RemoteSessionStore,
     path: &str,
 ) -> Result<bool, String> {
     if !path_util::is_remote_path(path) {
@@ -382,24 +551,31 @@ pub async fn remote_path_exists_inner(
     let (conn_id, rel) = parse_remote_path(path)?;
 
     let mut guard = store.inner.lock().await;
-    let session = match guard.get_mut(&conn_id) {
-        Some(s) => s,
+    let exists = match guard.get_mut(&conn_id) {
         None => return Ok(false),
+        Some(RemoteSession::Smb(session)) => {
+            if rel.is_empty() {
+                true
+            } else {
+                session.client.stat(&mut session.share, &rel).await.is_ok()
+            }
+        }
+        Some(RemoteSession::WebDav { .. }) => !rel.is_empty(),
+        Some(RemoteSession::Sftp(session)) => {
+            if rel.is_empty() {
+                true
+            } else {
+                super::remote_sftp::sftp_stat_is_dir(session, &rel).is_ok()
+                    || super::remote_sftp::sftp_read_file(session, &rel).is_ok()
+            }
+        }
     };
-
-    if rel.is_empty() {
-        return Ok(true);
-    }
-
-    match session.client.stat(&mut session.share, &rel).await {
-        Ok(_) => Ok(true),
-        Err(_) => Ok(false),
-    }
+    Ok(exists)
 }
 
 #[tauri::command]
 pub async fn remote_path_exists(
-    store: State<'_, Arc<SmbSessionStore>>,
+    store: State<'_, Arc<RemoteSessionStore>>,
     path: String,
 ) -> Result<bool, String> {
     remote_path_exists_inner(store.as_ref(), &path).await
@@ -407,7 +583,7 @@ pub async fn remote_path_exists(
 
 /// Read remote file bytes with an optional size cap (0 = unlimited).
 pub async fn read_remote_file_bytes(
-    store: &SmbSessionStore,
+    store: &RemoteSessionStore,
     remote_path: &str,
     max_bytes: u64,
 ) -> Result<Vec<u8>, String> {
@@ -417,75 +593,131 @@ pub async fn read_remote_file_bytes(
     }
 
     let mut guard = store.inner.lock().await;
-    let session = guard
-        .get_mut(&conn_id)
-        .ok_or_else(|| err::code("smb_session_missing"))?;
-
-    if max_bytes > 0 {
-        let info = session
-            .client
-            .stat(&mut session.share, &rel)
-            .await
-            .map_err(map_smb_err)?;
-        if info.size > max_bytes {
-            return Err(err::with_detail("smb_file_too_large", info.size));
+    match guard.get_mut(&conn_id) {
+        Some(RemoteSession::Smb(session)) => {
+            if max_bytes > 0 {
+                let info = session
+                    .client
+                    .stat(&mut session.share, &rel)
+                    .await
+                    .map_err(map_smb_err)?;
+                if info.size > max_bytes {
+                    return Err(err::with_detail("smb_file_too_large", info.size));
+                }
+            }
+            session
+                .client
+                .read_file_pipelined(&mut session.share, &rel)
+                .await
+                .map_err(map_smb_err)
         }
+        Some(RemoteSession::WebDav {
+            inner,
+            username,
+            password,
+        }) => {
+            let inner = inner.clone();
+            let username = username.clone();
+            let password = password.clone();
+            drop(guard);
+            let data = super::remote_webdav::webdav_read_file(&inner, &rel, &username, &password).await?;
+            if max_bytes > 0 && data.len() as u64 > max_bytes {
+                return Err(err::with_detail("smb_file_too_large", data.len()));
+            }
+            Ok(data)
+        }
+        Some(RemoteSession::Sftp(session)) => {
+            let data = super::remote_sftp::sftp_read_file(session, &rel)?;
+            if max_bytes > 0 && data.len() as u64 > max_bytes {
+                return Err(err::with_detail("smb_file_too_large", data.len()));
+            }
+            Ok(data)
+        }
+        None => Err(session_missing()),
     }
-
-    session
-        .client
-        .read_file_pipelined(&mut session.share, &rel)
-        .await
-        .map_err(map_smb_err)
 }
 
 #[tauri::command]
 pub async fn remote_path_info(
-    store: State<'_, Arc<SmbSessionStore>>,
+    store: State<'_, Arc<RemoteSessionStore>>,
     path: String,
 ) -> Result<RemoteDirEntry, String> {
     path_util::validate_user_path(&path)?;
     let (conn_id, rel) = parse_remote_path(&path)?;
 
     let mut guard = store.inner.lock().await;
-    let session = guard
-        .get_mut(&conn_id)
-        .ok_or_else(|| err::code("smb_session_missing"))?;
+    match guard.get_mut(&conn_id) {
+        Some(RemoteSession::Smb(session)) => {
+            let name = if rel.is_empty() {
+                session.share_name.clone()
+            } else {
+                rel.rsplit('/').next().unwrap_or(&rel).to_string()
+            };
 
-    let name = if rel.is_empty() {
-        session.share_name.clone()
-    } else {
-        rel.rsplit('/').next().unwrap_or(&rel).to_string()
-    };
+            if rel.is_empty() {
+                return Ok(RemoteDirEntry {
+                    name,
+                    path: join_remote_path(&conn_id, ""),
+                    is_dir: true,
+                    size: 0,
+                    size_formatted: format_size(0),
+                });
+            }
 
-    if rel.is_empty() {
-        return Ok(RemoteDirEntry {
-            name,
-            path: join_remote_path(&conn_id, ""),
-            is_dir: true,
-            size: 0,
-            size_formatted: format_size(0),
-        });
+            let info = session
+                .client
+                .stat(&mut session.share, &rel)
+                .await
+                .map_err(map_smb_err)?;
+
+            Ok(RemoteDirEntry {
+                name,
+                path: join_remote_path(&conn_id, &rel),
+                is_dir: info.is_directory,
+                size: info.size,
+                size_formatted: format_size(info.size),
+            })
+        }
+        Some(RemoteSession::WebDav { inner, .. }) => {
+            let name = if rel.is_empty() {
+                inner.label.clone()
+            } else {
+                rel.rsplit('/').next().unwrap_or(&rel).to_string()
+            };
+            Ok(RemoteDirEntry {
+                name,
+                path: join_remote_path(&conn_id, &rel),
+                is_dir: rel.is_empty(),
+                size: 0,
+                size_formatted: format_size(0),
+            })
+        }
+        Some(RemoteSession::Sftp(session)) => {
+            let name = if rel.is_empty() {
+                session.label.clone()
+            } else {
+                rel.rsplit('/').next().unwrap_or(&rel).to_string()
+            };
+            let is_dir = if rel.is_empty() {
+                true
+            } else {
+                super::remote_sftp::sftp_stat_is_dir(session, &rel).unwrap_or(false)
+            };
+            Ok(RemoteDirEntry {
+                name,
+                path: join_remote_path(&conn_id, &rel),
+                is_dir,
+                size: 0,
+                size_formatted: format_size(0),
+            })
+        }
+        None => Err(session_missing()),
     }
-
-    let info = session
-        .client
-        .stat(&mut session.share, &rel)
-        .await
-        .map_err(map_smb_err)?;
-
-    Ok(RemoteDirEntry {
-        name,
-        path: join_remote_path(&conn_id, &rel),
-        is_dir: info.is_directory,
-        size: info.size,
-        size_formatted: format_size(info.size),
-    })
 }
 
 /// Recursively list files under a remote directory (for search / transfer counting).
 pub async fn walk_remote_files(
-    store: &SmbSessionStore,
+    store: &RemoteSessionStore,
     conn_id: &str,
     rel: &str,
     out: &mut Vec<(String, u64, bool)>,
@@ -495,63 +727,64 @@ pub async fn walk_remote_files(
         return Ok(());
     }
 
-    let entries = {
-        let mut guard = store.inner.lock().await;
-        let session = guard
-            .get_mut(conn_id)
-            .ok_or_else(|| err::code("smb_session_missing"))?;
-        session
-            .client
-            .list_directory(&mut session.share, rel)
-            .await
-            .map_err(map_smb_err)?
-    };
-
-    for e in entries {
-        if e.name == "." || e.name == ".." {
-            continue;
+    let mut guard = store.inner.lock().await;
+    match guard.get_mut(conn_id) {
+        Some(RemoteSession::Smb(session)) => {
+            let entries = session
+                .client
+                .list_directory(&mut session.share, rel)
+                .await
+                .map_err(map_smb_err)?;
+            drop(guard);
+            for e in entries {
+                if e.name == "." || e.name == ".." {
+                    continue;
+                }
+                if out.len() >= cap {
+                    break;
+                }
+                let child_rel = if rel.is_empty() {
+                    e.name.clone()
+                } else {
+                    format!("{rel}/{}", e.name)
+                };
+                let remote_path = join_remote_path(conn_id, &child_rel);
+                if e.is_directory {
+                    out.push((remote_path, e.size, true));
+                    Box::pin(walk_remote_files(store, conn_id, &child_rel, out, cap)).await?;
+                } else {
+                    out.push((remote_path, e.size, false));
+                }
+            }
+            Ok(())
         }
-        if out.len() >= cap {
-            break;
+        Some(RemoteSession::WebDav {
+            inner,
+            username,
+            password,
+        }) => {
+            let inner = inner.clone();
+            let username = username.clone();
+            let password = password.clone();
+            drop(guard);
+            walk_webdav_files(&inner, conn_id, rel, &username, &password, out, cap).await
         }
-        let child_rel = if rel.is_empty() {
-            e.name.clone()
-        } else {
-            format!("{rel}/{}", e.name)
-        };
-        let remote_path = join_remote_path(conn_id, &child_rel);
-        if e.is_directory {
-            out.push((remote_path, e.size, true));
-            Box::pin(walk_remote_files(store, conn_id, &child_rel, out, cap)).await?;
-        } else {
-            out.push((remote_path, e.size, false));
+        Some(RemoteSession::Sftp(session)) => {
+            let session = session.clone();
+            drop(guard);
+            walk_sftp_files(&session, conn_id, rel, out, cap)
         }
+        None => Err(session_missing()),
     }
-    Ok(())
 }
 
 /// Copy a single remote file to a local path.
 pub async fn download_remote_file(
-    store: &SmbSessionStore,
+    store: &RemoteSessionStore,
     remote_path: &str,
     local_path: &Path,
 ) -> Result<(), String> {
-    let (conn_id, rel) = parse_remote_path(remote_path)?;
-    if rel.is_empty() {
-        return Err(err::code("smb_path_is_dir"));
-    }
-
-    let data = {
-        let mut guard = store.inner.lock().await;
-        let session = guard
-            .get_mut(&conn_id)
-            .ok_or_else(|| err::code("smb_session_missing"))?;
-        session
-            .client
-            .read_file_pipelined(&mut session.share, &rel)
-            .await
-            .map_err(map_smb_err)?
-    };
+    let data = read_remote_file_bytes(store, remote_path, 0).await?;
 
     if let Some(parent) = local_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| err::with_detail("copy_failed", e))?;
@@ -562,7 +795,7 @@ pub async fn download_remote_file(
 
 /// Upload a local file to a remote path (file path on share).
 pub async fn upload_local_file(
-    store: &SmbSessionStore,
+    store: &RemoteSessionStore,
     local_path: &Path,
     remote_path: &str,
 ) -> Result<(), String> {
@@ -574,21 +807,34 @@ pub async fn upload_local_file(
     let data = std::fs::read(local_path).map_err(|e| err::with_detail("copy_failed", e))?;
 
     let mut guard = store.inner.lock().await;
-    let session = guard
-        .get_mut(&conn_id)
-        .ok_or_else(|| err::code("smb_session_missing"))?;
-
-    // Ensure parent directories exist
-    if let Some((parent, _)) = rel.rsplit_once('/') {
-        ensure_remote_dirs(session, parent).await?;
+    match guard.get_mut(&conn_id) {
+        Some(RemoteSession::Smb(session)) => {
+            if let Some((parent, _)) = rel.rsplit_once('/') {
+                ensure_remote_dirs(session, parent).await?;
+            }
+            session
+                .client
+                .write_file_pipelined(&session.share, &rel, &data)
+                .await
+                .map_err(map_smb_err)?;
+            Ok(())
+        }
+        Some(RemoteSession::WebDav {
+            inner,
+            username,
+            password,
+        }) => {
+            let inner = inner.clone();
+            let username = username.clone();
+            let password = password.clone();
+            drop(guard);
+            super::remote_webdav::webdav_write_file(&inner, &rel, &data, &username, &password).await
+        }
+        Some(RemoteSession::Sftp(session)) => {
+            super::remote_sftp::sftp_write_file(session, &rel, &data)
+        }
+        None => Err(session_missing()),
     }
-
-    session
-        .client
-        .write_file_pipelined(&session.share, &rel, &data)
-        .await
-        .map_err(map_smb_err)?;
-    Ok(())
 }
 
 async fn ensure_remote_dirs(session: &mut SmbSession, rel: &str) -> Result<(), String> {
@@ -621,7 +867,7 @@ async fn ensure_remote_dirs(session: &mut SmbSession, rel: &str) -> Result<(), S
 
 /// Recursively download remote dir/file into local directory (places item under target_dir).
 pub async fn transfer_remote_to_local(
-    store: &SmbSessionStore,
+    store: &RemoteSessionStore,
     source_remote: &str,
     target_dir: &Path,
     conflict: &str,
@@ -632,32 +878,33 @@ pub async fn transfer_remote_to_local(
     let mut failed = 0u64;
     let mut errors = Vec::new();
 
-    let info = {
+    let is_dir = if rel.is_empty() {
+        true
+    } else {
         let mut guard = store.inner.lock().await;
-        let session = guard
-            .get_mut(&conn_id)
-            .ok_or_else(|| err::code("smb_session_missing"))?;
-        if rel.is_empty() {
-            None
-        } else {
-            Some(
-                session
-                    .client
-                    .stat(&mut session.share, &rel)
-                    .await
-                    .map_err(map_smb_err)?,
-            )
+        match guard.get_mut(&conn_id) {
+            Some(RemoteSession::Smb(session)) => session
+                .client
+                .stat(&mut session.share, &rel)
+                .await
+                .map(|i| i.is_directory)
+                .map_err(map_smb_err)?,
+            Some(RemoteSession::Sftp(session)) => {
+                super::remote_sftp::sftp_stat_is_dir(session, &rel)?
+            }
+            Some(RemoteSession::WebDav { .. }) => false,
+            None => return Err(session_missing()),
         }
     };
-
-    let is_dir = info.as_ref().map(|i| i.is_directory).unwrap_or(true);
     let base_name = if rel.is_empty() {
         {
             let guard = store.inner.lock().await;
-            guard
-                .get(&conn_id)
-                .map(|s| s.share_name.clone())
-                .unwrap_or_else(|| "share".into())
+            match guard.get(&conn_id) {
+                Some(RemoteSession::Smb(s)) => s.share_name.clone(),
+                Some(RemoteSession::WebDav { inner, .. }) => inner.label.clone(),
+                Some(RemoteSession::Sftp(s)) => s.label.clone(),
+                None => "share".into(),
+            }
         }
     } else {
         rel.rsplit('/').next().unwrap_or(&rel).to_string()
@@ -734,7 +981,7 @@ pub async fn transfer_remote_to_local(
 
 /// Recursively upload local path into remote directory.
 pub async fn transfer_local_to_remote(
-    store: &SmbSessionStore,
+    store: &RemoteSessionStore,
     source_local: &Path,
     target_remote_dir: &str,
     conflict: &str,
@@ -765,33 +1012,24 @@ pub async fn transfer_local_to_remote(
             join_remote_path(&conn_id, &format!("{target_rel}/{base_name}"))
         };
 
-        // conflict check
-        {
-            let mut guard = store.inner.lock().await;
-            let session = guard
-                .get_mut(&conn_id)
-                .ok_or_else(|| err::code("smb_session_missing"))?;
-            let rel = parse_remote_path(&remote_file)?.1;
-            if session.client.stat(&mut session.share, &rel).await.is_ok() {
-                match conflict {
-                    "skip" => return Ok((0, 1, 0, errors)),
-                    "rename" => {
-                        // simple rename suffix
-                        let renamed = unique_remote_name(&rel);
-                        let remote_file = join_remote_path(&conn_id, &renamed);
-                        drop(guard);
-                        match upload_local_file(store, source_local, &remote_file).await {
-                            Ok(()) => transferred += 1,
-                            Err(e) => {
-                                failed += 1;
-                                errors.push(e);
-                            }
+        if remote_path_exists_inner(store, &remote_file).await.unwrap_or(false) {
+            match conflict {
+                "skip" => return Ok((0, 1, 0, errors)),
+                "rename" => {
+                    let rel = parse_remote_path(&remote_file)?.1;
+                    let renamed = unique_remote_name(&rel);
+                    let remote_file = join_remote_path(&conn_id, &renamed);
+                    match upload_local_file(store, source_local, &remote_file).await {
+                        Ok(()) => transferred += 1,
+                        Err(e) => {
+                            failed += 1;
+                            errors.push(e);
                         }
-                        return Ok((transferred, skipped, failed, errors));
                     }
-                    "overwrite" => {}
-                    _ => return Err(err::code("invalid_conflict_resolution")),
+                    return Ok((transferred, skipped, failed, errors));
                 }
+                "overwrite" => {}
+                _ => return Err(err::code("invalid_conflict_resolution")),
             }
         }
 
@@ -814,10 +1052,9 @@ pub async fn transfer_local_to_remote(
 
     {
         let mut guard = store.inner.lock().await;
-        let session = guard
-            .get_mut(&conn_id)
-            .ok_or_else(|| err::code("smb_session_missing"))?;
-        ensure_remote_dirs(session, &root_rel).await?;
+        if let Some(RemoteSession::Smb(session)) = guard.get_mut(&conn_id) {
+            ensure_remote_dirs(session, &root_rel).await?;
+        }
     }
 
     let walker = walkdir::WalkDir::new(source_local).follow_links(false);
@@ -836,12 +1073,11 @@ pub async fn transfer_local_to_remote(
 
         if path.is_dir() {
             let mut guard = store.inner.lock().await;
-            let session = guard
-                .get_mut(&conn_id)
-                .ok_or_else(|| err::code("smb_session_missing"))?;
-            if let Err(e) = ensure_remote_dirs(session, &remote_rel).await {
-                failed += 1;
-                errors.push(e);
+            if let Some(RemoteSession::Smb(session)) = guard.get_mut(&conn_id) {
+                if let Err(e) = ensure_remote_dirs(session, &remote_rel).await {
+                    failed += 1;
+                    errors.push(e);
+                }
             }
             continue;
         }
@@ -850,21 +1086,13 @@ pub async fn transfer_local_to_remote(
         }
 
         let remote_file = join_remote_path(&conn_id, &remote_rel);
-        {
-            let mut guard = store.inner.lock().await;
-            let session = guard
-                .get_mut(&conn_id)
-                .ok_or_else(|| err::code("smb_session_missing"))?;
-            if session
-                .client
-                .stat(&mut session.share, &remote_rel)
+        if conflict == "skip"
+            && remote_path_exists_inner(store, &remote_file)
                 .await
-                .is_ok()
-                && conflict == "skip"
-            {
-                skipped += 1;
-                continue;
-            }
+                .unwrap_or(false)
+        {
+            skipped += 1;
+            continue;
         }
 
         match upload_local_file(store, path, &remote_file).await {
@@ -919,7 +1147,7 @@ fn unique_remote_name(rel: &str) -> String {
 /// High-level transfer command that supports remote:// on either side.
 #[tauri::command]
 pub async fn transfer_files_remote(
-    store: State<'_, Arc<SmbSessionStore>>,
+    store: State<'_, Arc<RemoteSessionStore>>,
     source_paths: Vec<String>,
     target_path: String,
     conflict_resolution: String,

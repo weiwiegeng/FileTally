@@ -6,3 +6,5 @@ export * from './settingsStore';
 export * from './analysisStore';
 export * from './transferStore';
 export * from './checkConfigStore';
+export * from './taskStore';
+export * from './placesStore';

@@ -7,6 +7,10 @@ pub mod excel_runtime;
 pub mod excel_remote;
 pub mod excel_check;
 pub mod remote;
+pub mod remote_sftp;
+pub mod remote_webdav;
+pub mod credentials;
+pub mod tools;
 
 pub use disk::*;
 pub use file::*;
@@ -16,3 +20,5 @@ pub use transfer::*;
 pub use excel_runtime::*;
 pub use excel_check::*;
 pub use remote::*;
+pub use credentials::*;
+pub use tools::*;

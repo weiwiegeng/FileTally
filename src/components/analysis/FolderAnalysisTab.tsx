@@ -111,6 +111,8 @@ export const FolderAnalysisTab: React.FC = () => {
     }
   };
 
+  const [activeJobId, setActiveJobId] = useState(0);
+
   const handleAnalyze = async () => {
     if (!folderAnalysisPath) return;
     
@@ -118,13 +120,17 @@ export const FolderAnalysisTab: React.FC = () => {
     setAiInsight('');
     analyzeFolderStart();
     try {
+      const jobId = await invoke<number>('prepare_analysis');
+      setActiveJobId(jobId);
       const result = await invoke<FolderAnalysisResult>('analyze_folder', {
         path: folderAnalysisPath,
-        largeFileThresholdMb: 100, // 100MB以上算大文件
-        oldFileDays: 180, // 180天未修改算旧文件
+        largeFileThresholdMb: 100,
+        oldFileDays: 180,
+        jobId,
       });
       analyzeFolderSuccess(result);
       setProgress(null);
+      setActiveJobId(0);
       if (result.truncated) {
         message.warning(t('analysis.folder.truncatedWarning'));
       }
@@ -132,7 +138,16 @@ export const FolderAnalysisTab: React.FC = () => {
       console.error('analyze failed:', err);
       analyzeFolderError();
       setProgress(null);
+      setActiveJobId(0);
       message.error(t('analysis.folder.analyzeFailed', { error: mapBackendError(err) }));
+    }
+  };
+
+  const handleCancelAnalyze = async () => {
+    try {
+      await invoke('cancel_analysis', { jobId: activeJobId > 0 ? activeJobId : null });
+    } catch {
+      // ignore
     }
   };
 
@@ -361,6 +376,12 @@ export const FolderAnalysisTab: React.FC = () => {
         >
           {t('analysis.folder.startAnalyze')}
         </Button>
+
+        {folderAnalysisLoading && (
+          <Button danger onClick={() => void handleCancelAnalyze()}>
+            {t('common.cancel')}
+          </Button>
+        )}
         
         {folderAnalysis && (
           <Button

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Form, Input, Select, Button, Space, InputNumber, message } from 'antd';
+import { Form, Input, Select, Button, Space, InputNumber, Switch, message } from 'antd';
 import {
   CloudServerOutlined,
   UserOutlined,
@@ -26,14 +26,15 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
   const [form] = Form.useForm();
   const { addConnection, updateConnection } = useRemoteStore();
   const mode = Form.useWatch('mode', form) || editingConnection?.mode || 'direct';
+  const type = Form.useWatch('type', form) || editingConnection?.type || 'smb';
 
-  const handleSubmit = async (values: any) => {
+  const handleSubmit = async (values: Record<string, unknown>) => {
     try {
       if (editingConnection) {
-        updateConnection(editingConnection.id, values);
+        updateConnection(editingConnection.id, values as Partial<RemoteConnection>);
         message.success(t('remote.connectionForm.updateSuccess'));
       } else {
-        addConnection(values);
+        addConnection(values as Omit<RemoteConnection, 'id' | 'status'>);
         message.success(t('remote.connectionForm.addSuccess'));
       }
       form.resetFields();
@@ -47,11 +48,14 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
     <Form
       form={form}
       layout="vertical"
-      initialValues={editingConnection || {
-        type: 'smb',
-        mode: 'direct',
-        port: 445,
-      }}
+      initialValues={
+        editingConnection || {
+          type: 'smb',
+          mode: 'direct',
+          port: 445,
+          rememberPassword: true,
+        }
+      }
       onFinish={handleSubmit}
       style={{ maxWidth: 500 }}
     >
@@ -66,97 +70,118 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
         />
       </Form.Item>
 
-      <Form.Item
-        name="type"
-        label={t('remote.connectionForm.labelType')}
-        rules={[{ required: true }]}
-      >
+      <Form.Item name="type" label={t('remote.connectionForm.labelType')} rules={[{ required: true }]}>
         <Select
           options={[
             { value: 'smb', label: t('remote.connectionForm.typeSmb') },
+            { value: 'webdav', label: t('remote.connectionForm.typeWebdav') },
+            { value: 'sftp', label: t('remote.connectionForm.typeSftp') },
           ]}
+          onChange={(v) => {
+            if (v === 'smb') form.setFieldsValue({ port: 445, mode: 'direct' });
+            if (v === 'sftp') form.setFieldsValue({ port: 22, mode: 'direct' });
+            if (v === 'webdav') form.setFieldsValue({ mode: 'direct', port: undefined });
+          }}
         />
       </Form.Item>
 
-      <Form.Item
-        name="mode"
-        label={t('remote.connectionForm.labelMode')}
-        rules={[{ required: true }]}
-        extra={t('remote.connectionForm.modeHint')}
-      >
-        <Select
-          options={[
-            { value: 'direct', label: t('remote.connectionForm.modeDirect') },
-            { value: 'system', label: t('remote.connectionForm.modeSystem') },
-          ]}
-        />
-      </Form.Item>
+      {type === 'smb' && (
+        <Form.Item
+          name="mode"
+          label={t('remote.connectionForm.labelMode')}
+          rules={[{ required: true }]}
+          extra={t('remote.connectionForm.modeHint')}
+        >
+          <Select
+            options={[
+              { value: 'direct', label: t('remote.connectionForm.modeDirect') },
+              { value: 'system', label: t('remote.connectionForm.modeSystem') },
+            ]}
+          />
+        </Form.Item>
+      )}
 
-      <Form.Item
-        name="host"
-        label={t('remote.connectionForm.labelHost')}
-        rules={[{ required: true, message: t('remote.connectionForm.hostRequired') }]}
-      >
-        <Input
-          prefix={<GlobalOutlined style={{ color: '#8c8c8c' }} />}
-          placeholder={t('remote.connectionForm.hostPlaceholder')}
-        />
-      </Form.Item>
+      {type === 'webdav' ? (
+        <Form.Item
+          name="baseUrl"
+          label={t('remote.connectionForm.labelWebdavUrl')}
+          rules={[{ required: true, message: t('remote.connectionForm.hostRequired') }]}
+        >
+          <Input
+            prefix={<GlobalOutlined style={{ color: '#8c8c8c' }} />}
+            placeholder={t('remote.connectionForm.webdavUrlPlaceholder')}
+          />
+        </Form.Item>
+      ) : (
+        <Form.Item
+          name="host"
+          label={t('remote.connectionForm.labelHost')}
+          rules={[{ required: true, message: t('remote.connectionForm.hostRequired') }]}
+        >
+          <Input
+            prefix={<GlobalOutlined style={{ color: '#8c8c8c' }} />}
+            placeholder={t('remote.connectionForm.hostPlaceholder')}
+          />
+        </Form.Item>
+      )}
 
-      <Form.Item
-        name="port"
-        label={t('remote.connectionForm.labelPort')}
-      >
-        <InputNumber
-          style={{ width: '100%' }}
-          placeholder={t('remote.connectionForm.portPlaceholder')}
-        />
-      </Form.Item>
+      {type !== 'webdav' && (
+        <Form.Item name="port" label={t('remote.connectionForm.labelPort')}>
+          <InputNumber style={{ width: '100%' }} placeholder={t('remote.connectionForm.portPlaceholder')} />
+        </Form.Item>
+      )}
 
-      <Form.Item
-        name="share"
-        label={t('remote.connectionForm.labelShare')}
-        rules={[{ required: true, message: t('remote.connectionForm.shareRequired') }]}
-      >
-        <Input
-          prefix={<FolderOutlined style={{ color: '#8c8c8c' }} />}
-          placeholder={t('remote.connectionForm.sharePlaceholder')}
-        />
-      </Form.Item>
+      {type === 'smb' && (
+        <Form.Item
+          name="share"
+          label={t('remote.connectionForm.labelShare')}
+          rules={[{ required: true, message: t('remote.connectionForm.shareRequired') }]}
+        >
+          <Input
+            prefix={<FolderOutlined style={{ color: '#8c8c8c' }} />}
+            placeholder={t('remote.connectionForm.sharePlaceholder')}
+          />
+        </Form.Item>
+      )}
+
+      {type === 'sftp' && (
+        <Form.Item name="remoteRoot" label={t('remote.connectionForm.labelRemoteRoot')}>
+          <Input prefix={<FolderOutlined style={{ color: '#8c8c8c' }} />} placeholder="/" />
+        </Form.Item>
+      )}
 
       <Form.Item
         name="username"
         label={t('remote.connectionForm.labelUsername')}
         rules={
-          mode === 'direct'
+          type !== 'smb' || mode === 'direct'
             ? [{ required: true, message: t('remote.connectionForm.usernameRequired') }]
             : undefined
         }
       >
         <Input
           prefix={<UserOutlined style={{ color: '#8c8c8c' }} />}
-          placeholder={
-            mode === 'direct'
-              ? t('remote.connectionForm.usernameRequiredPlaceholder')
-              : t('remote.connectionForm.usernamePlaceholder')
-          }
+          placeholder={t('remote.connectionForm.usernamePlaceholder')}
         />
       </Form.Item>
 
-      <Form.Item
-        name="password"
-        label={t('remote.connectionForm.labelPassword')}
-      >
+      <Form.Item name="password" label={t('remote.connectionForm.labelPassword')}>
         <Input.Password
           prefix={<LockOutlined style={{ color: '#8c8c8c' }} />}
           placeholder={t('remote.connectionForm.passwordPlaceholder')}
         />
       </Form.Item>
 
+      <Form.Item name="rememberPassword" label={t('remote.connectionForm.rememberPassword')} valuePropName="checked">
+        <Switch />
+      </Form.Item>
+
       <Form.Item>
         <Space>
           <Button type="primary" htmlType="submit">
-            {editingConnection ? t('remote.connectionForm.submitSave') : t('remote.connectionForm.submitAdd')}
+            {editingConnection
+              ? t('remote.connectionForm.submitSave')
+              : t('remote.connectionForm.submitAdd')}
           </Button>
           {onCancel && (
             <Button onClick={onCancel}>{t('remote.connectionForm.cancel')}</Button>
