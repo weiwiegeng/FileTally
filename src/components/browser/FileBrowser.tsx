@@ -1,5 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Button, Typography, Space, Switch, Select, Dropdown, Tag, Tooltip, Alert, Tabs } from 'antd';
+import {
+  Button,
+  Typography,
+  Space,
+  Switch,
+  Select,
+  Dropdown,
+  Tag,
+  Tooltip,
+  Alert,
+  Tabs,
+  ColorPicker,
+  Popover,
+  Input,
+} from 'antd';
 import {
   FolderOpenOutlined,
   EyeOutlined,
@@ -13,9 +27,18 @@ import {
   StarFilled,
   UnorderedListOutlined,
   ApartmentOutlined,
+  CopyOutlined,
+  TagOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useFileStore, useSettingsStore, useRemoteStore, usePlacesStore } from '../../stores';
+import {
+  useFileStore,
+  useSettingsStore,
+  useRemoteStore,
+  usePlacesStore,
+  useTagStore,
+} from '../../stores';
+import { BatchOpsModal } from './BatchOpsModal';
 import { FileTree } from './FileTree';
 import { FileListView } from './FileListView';
 import { FilePreview } from './FilePreview';
@@ -44,6 +67,7 @@ export const FileBrowser: React.FC = () => {
     setViewMode,
     viewMode,
     error,
+    selectedFile,
   } = useFileStore();
   const { settings } = useSettingsStore();
   const { connections } = useRemoteStore();
@@ -52,6 +76,22 @@ export const FileBrowser: React.FC = () => {
   const initializedRef = useRef(false);
   const [showRemoteSelector, setShowRemoteSelector] = useState(false);
   const [activeTabPath, setActiveTabPath] = useState<string | undefined>();
+  const [batchOpen, setBatchOpen] = useState(false);
+  const { tags, loadTags, setTag, getTagForPath } = useTagStore();
+  const [tagLabel, setTagLabel] = useState('');
+  const [tagColor, setTagColor] = useState('#1890ff');
+
+  useEffect(() => {
+    void loadTags();
+  }, [loadTags]);
+
+  useEffect(() => {
+    if (activeTabPath) {
+      const existing = getTagForPath(activeTabPath);
+      setTagLabel(existing?.label || '');
+      setTagColor(existing?.color || '#1890ff');
+    }
+  }, [activeTabPath, tags, getTagForPath]);
 
   useEffect(() => {
     if (currentPaths.length && !activeTabPath) {
@@ -184,6 +224,49 @@ export const FileBrowser: React.FC = () => {
               onChange={handleShowHiddenChange}
             />
           </Space>
+          <Button
+            size="small"
+            icon={<CopyOutlined />}
+            disabled={!activeTabPath && !selectedFile}
+            onClick={() => setBatchOpen(true)}
+          >
+            {t('batch.toolbar')}
+          </Button>
+          {activeTabPath && (
+            <Popover
+              title={t('tags.setTitle')}
+              trigger="click"
+              content={
+                <Space direction="vertical" style={{ width: 220 }}>
+                  <Input
+                    size="small"
+                    value={tagLabel}
+                    onChange={(e) => setTagLabel(e.target.value)}
+                    placeholder={t('tags.labelPlaceholder')}
+                  />
+                  <ColorPicker
+                    size="small"
+                    value={tagColor}
+                    onChange={(_, hex) => setTagColor(hex)}
+                  />
+                  <Button
+                    type="primary"
+                    size="small"
+                    block
+                    onClick={() =>
+                      void setTag(activeTabPath, tagColor, tagLabel || activeTabPath)
+                    }
+                  >
+                    {t('tags.save')}
+                  </Button>
+                </Space>
+              }
+            >
+              <Button size="small" icon={<TagOutlined />}>
+                {t('tags.action')}
+              </Button>
+            </Popover>
+          )}
           {activeTabPath && (
             <Button
               size="small"
@@ -260,25 +343,57 @@ export const FileBrowser: React.FC = () => {
             alignItems: 'center',
           }}
         >
-          {favorites.slice(0, 8).map((f) => (
-            <Tag
-              key={f.id}
-              color="gold"
-              style={{ cursor: 'pointer' }}
-              onClick={() => void addPath(f.path)}
-            >
-              <StarFilled /> {f.label}
-            </Tag>
-          ))}
-          {recent.slice(0, 5).map((r) => (
-            <Tag
-              key={r.id}
-              style={{ cursor: 'pointer' }}
-              onClick={() => void addPath(r.path)}
-            >
-              {r.label}
-            </Tag>
-          ))}
+          {favorites.slice(0, 8).map((f) => {
+            const tag = getTagForPath(f.path);
+            return (
+              <Tag
+                key={f.id}
+                color="gold"
+                style={{ cursor: 'pointer' }}
+                onClick={() => void addPath(f.path)}
+              >
+                {tag ? (
+                  <span
+                    style={{
+                      display: 'inline-block',
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      background: tag.color,
+                      marginRight: 6,
+                    }}
+                  />
+                ) : (
+                  <StarFilled />
+                )}{' '}
+                {f.label}
+              </Tag>
+            );
+          })}
+          {recent.slice(0, 5).map((r) => {
+            const tag = getTagForPath(r.path);
+            return (
+              <Tag
+                key={r.id}
+                style={{ cursor: 'pointer' }}
+                onClick={() => void addPath(r.path)}
+              >
+                {tag ? (
+                  <span
+                    style={{
+                      display: 'inline-block',
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      background: tag.color,
+                      marginRight: 6,
+                    }}
+                  />
+                ) : null}
+                {r.label}
+              </Tag>
+            );
+          })}
         </div>
       )}
 
@@ -370,6 +485,18 @@ export const FileBrowser: React.FC = () => {
         open={showRemoteSelector}
         onClose={() => setShowRemoteSelector(false)}
         onSelect={(path) => addPath(path)}
+      />
+
+      <BatchOpsModal
+        open={batchOpen}
+        initialPaths={
+          selectedFile
+            ? [selectedFile.path]
+            : activeTabPath
+              ? [activeTabPath]
+              : []
+        }
+        onClose={() => setBatchOpen(false)}
       />
     </div>
   );

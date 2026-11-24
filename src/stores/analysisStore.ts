@@ -1,4 +1,7 @@
 import { create } from 'zustand';
+import { invoke } from '@tauri-apps/api/core';
+import { mapBackendError } from '../utils/backendError';
+import { makeTaskId, useTaskStore } from './taskStore';
 
 // 文件类型统计
 export interface FileTypeStats {
@@ -96,9 +99,10 @@ interface AnalysisState {
   scanCleanupError: () => void;
   clearFolderAnalysis: () => void;
   clearCleanupSuggestion: () => void;
+  runFolderAnalysis: () => Promise<void>;
 }
 
-export const useAnalysisStore = create<AnalysisState>((set) => ({
+export const useAnalysisStore = create<AnalysisState>((set, get) => ({
   folderAnalysis: null,
   folderAnalysisLoading: false,
   folderAnalysisPath: '',
@@ -131,4 +135,51 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
   clearFolderAnalysis: () => set({ folderAnalysis: null, folderAnalysisPath: '' }),
   
   clearCleanupSuggestion: () => set({ cleanupSuggestion: null }),
+
+  runFolderAnalysis: async () => {
+    const path = get().folderAnalysisPath;
+    if (!path) return;
+
+    const retryPayload = { action: 'analyzeFolder' as const, path };
+    set({ folderAnalysisLoading: true });
+
+    let taskId = '';
+    let jobId = 0;
+    try {
+      jobId = await invoke<number>('prepare_analysis');
+      taskId = makeTaskId('analysis', jobId);
+      useTaskStore.getState().upsertTask({
+        id: taskId,
+        kind: 'analysis',
+        title: path,
+        status: 'running',
+        backendJobId: jobId,
+        progress: { current: 0, total: 0, percentage: 0 },
+        startedAt: Date.now(),
+        cancellable: true,
+        retryPayload,
+      });
+
+      const result = await invoke<FolderAnalysisResult>('analyze_folder', {
+        path,
+        largeFileThresholdMb: 100,
+        oldFileDays: 180,
+        jobId,
+      });
+
+      set({
+        folderAnalysis: result,
+        folderAnalysisLoading: false,
+      });
+      useTaskStore.getState().completeTask(taskId, 'completed', undefined, retryPayload);
+    } catch (err) {
+      set({ folderAnalysisLoading: false });
+      if (taskId) {
+        useTaskStore
+          .getState()
+          .completeTask(taskId, 'failed', mapBackendError(err), retryPayload);
+      }
+      throw err;
+    }
+  },
 }));

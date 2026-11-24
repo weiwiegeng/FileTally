@@ -33,7 +33,12 @@ interface TaskState {
   upsertTask: (task: AppTask) => void;
   updateTask: (id: string, patch: Partial<AppTask>) => void;
   updateProgress: (id: string, progress: Partial<TaskProgress> & { status?: TaskStatus }) => void;
-  completeTask: (id: string, status?: TaskStatus, error?: string) => void;
+  completeTask: (
+    id: string,
+    status?: TaskStatus,
+    error?: string,
+    retryPayload?: Record<string, unknown>
+  ) => void;
   cancelTask: (id: string) => Promise<void>;
   clearFinished: () => void;
   removeTask: (id: string) => void;
@@ -115,7 +120,7 @@ export const useTaskStore = create<TaskState>()(
         }));
       },
 
-      completeTask: (id, status = 'completed', error) => {
+      completeTask: (id, status = 'completed', error, retryPayload) => {
         set((state) => ({
           tasks: state.tasks.map((t) =>
             t.id === id
@@ -123,6 +128,7 @@ export const useTaskStore = create<TaskState>()(
                   ...t,
                   status,
                   error,
+                  retryPayload: retryPayload !== undefined ? retryPayload : t.retryPayload,
                   finishedAt: Date.now(),
                   progress: {
                     ...t.progress,

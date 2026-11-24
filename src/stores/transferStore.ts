@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import i18n from '../i18n';
 import { mapBackendError } from '../utils/backendError';
 import { makeTaskId, useTaskStore } from './taskStore';
+import { useSettingsStore } from './settingsStore';
 
 // 传输方向
 export type TransferDirection = 'upload' | 'download';
@@ -126,6 +127,28 @@ const formatSize = (size: number): string => {
 // 生成唯一 ID
 const generateId = () => Math.random().toString(36).substring(2, 15);
 
+type QueuedTransfer = { resolution: ConflictResolution };
+
+const transferQueue: QueuedTransfer[] = [];
+
+const drainTransferQueue = () => {
+  const next = transferQueue.shift();
+  if (next) {
+    void useTransferStore.getState().startTransfer(next.resolution);
+  }
+};
+
+const transferRetryPayload = (
+  resolution: ConflictResolution,
+  sourcePaths: string[],
+  targetPath: string
+) => ({
+  action: 'transfer' as const,
+  resolution,
+  sourcePaths,
+  targetPath,
+});
+
 export const useTransferStore = create<TransferState>((set, get) => ({
   // 初始状态
   direction: 'upload',
@@ -217,20 +240,19 @@ export const useTransferStore = create<TransferState>((set, get) => ({
   },
   
   startTransfer: async (resolution) => {
-    const { sourceItems, targetPath, activeJobId: prevJobId } = get();
-    
+    const { sourceItems, targetPath, transferring } = get();
+
     if (sourceItems.length === 0 || !targetPath) {
       set({ error: i18n.t('transfer.store.needSourceAndTarget') });
       return;
     }
 
-    if (prevJobId > 0) {
-      try {
-        await invoke('cancel_transfer', { jobId: prevJobId });
-      } catch {
-        // ignore
-      }
+    if (transferring) {
+      transferQueue.push({ resolution });
+      return;
     }
+
+    const sourcePaths = sourceItems.map((item) => item.sourcePath);
     
     let jobId = 0;
     try {
@@ -268,20 +290,26 @@ export const useTransferStore = create<TransferState>((set, get) => ({
       },
     });
     
+    const retryPayload = transferRetryPayload(resolution, sourcePaths, targetPath);
+
     try {
-      const sourcePaths = sourceItems.map(item => item.sourcePath);
+      const maxConcurrency = Math.max(
+        1,
+        useSettingsStore.getState().settings.transferConcurrency || 1
+      );
       const result = await invoke<TransferResult>('transfer_files', {
         sourcePaths,
         targetPath,
         conflictResolution: resolution,
         jobId,
+        maxConcurrency,
       });
 
       const mapped: TransferResult = {
         ...result,
         errors: (result.errors || []).map((e) => mapBackendError(e)),
       };
-      
+
       set({
         result: mapped,
         transferring: false,
@@ -290,8 +318,13 @@ export const useTransferStore = create<TransferState>((set, get) => ({
       });
       useTaskStore
         .getState()
-        .completeTask(taskId, mapped.cancelled ? 'cancelled' : mapped.success ? 'completed' : 'failed');
-      
+        .completeTask(
+          taskId,
+          mapped.cancelled ? 'cancelled' : mapped.success ? 'completed' : 'failed',
+          undefined,
+          retryPayload
+        );
+
       if (mapped.success) {
         set({ sourceItems: [] });
       }
@@ -302,7 +335,11 @@ export const useTransferStore = create<TransferState>((set, get) => ({
         activeJobId: 0,
         progress: null,
       });
-      useTaskStore.getState().completeTask(taskId, 'failed', mapBackendError(err));
+      useTaskStore
+        .getState()
+        .completeTask(taskId, 'failed', mapBackendError(err), retryPayload);
+    } finally {
+      drainTransferQueue();
     }
   },
   

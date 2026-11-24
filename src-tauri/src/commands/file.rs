@@ -133,10 +133,43 @@ fn get_mime_type(extension: &str) -> String {
     }
 }
 
+fn remote_entry_to_node(entry: &crate::commands::remote::RemoteDirEntry) -> FileNode {
+    let path = Path::new(&entry.path);
+    let extension = if entry.is_dir {
+        String::new()
+    } else {
+        path.extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_default()
+    };
+    let is_hidden = entry.name.starts_with('.');
+    FileNode {
+        id: generate_id(path),
+        name: entry.name.clone(),
+        path: entry.path.clone(),
+        is_dir: entry.is_dir,
+        size: entry.size,
+        modified_time: 0,
+        created_time: 0,
+        extension,
+        children: None,
+        is_loaded: false,
+        children_count: None,
+        is_hidden,
+    }
+}
+
 /// Scan a directory and return first-level children (lazy loading)
 #[tauri::command]
-pub async fn scan_directory(path: String) -> Result<Vec<FileNode>, String> {
+pub async fn scan_directory(
+    store: tauri::State<'_, std::sync::Arc<crate::commands::remote::RemoteSessionStore>>,
+    path: String,
+) -> Result<Vec<FileNode>, String> {
     crate::path_util::validate_user_path(&path)?;
+    if crate::path_util::is_remote_path(&path) {
+        let entries = crate::commands::remote::list_remote_dir_inner(store.as_ref(), &path).await?;
+        return Ok(entries.iter().map(remote_entry_to_node).collect());
+    }
     tokio::task::spawn_blocking(move || scan_directory_sync(path))
         .await
         .map_err(|e| crate::err::with_detail("task_join_failed", e))?
@@ -233,13 +266,79 @@ fn scan_directory_sync(path: String) -> Result<Vec<FileNode>, String> {
     Ok(nodes)
 }
 
+const REMOTE_PREVIEW_MAX: u64 = 30 * 1024 * 1024;
+
 /// Get file preview information
 #[tauri::command]
-pub async fn get_file_preview(path: String) -> Result<FilePreviewInfo, String> {
+pub async fn get_file_preview(
+    store: tauri::State<'_, std::sync::Arc<crate::commands::remote::RemoteSessionStore>>,
+    path: String,
+) -> Result<FilePreviewInfo, String> {
     crate::path_util::validate_user_path(&path)?;
+
+    if crate::path_util::is_remote_path(&path) {
+        let info = crate::commands::remote::remote_path_info(store.clone(), path.clone()).await?;
+        if info.is_dir {
+            return Err(crate::err::code("path_not_file"));
+        }
+        if info.size > REMOTE_PREVIEW_MAX {
+            return Ok(remote_metadata_only_preview(&path, &info));
+        }
+        let bytes = crate::commands::remote::read_remote_file_bytes(store.as_ref(), &path, REMOTE_PREVIEW_MAX).await?;
+        let temp_dir = std::env::temp_dir().join("filetally_remote_preview");
+        std::fs::create_dir_all(&temp_dir).map_err(|e| crate::err::with_detail("preview_temp_failed", e))?;
+        let temp_path = temp_dir.join(format!(
+            "{:x}_{}",
+            {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                path.hash(&mut hasher);
+                hasher.finish()
+            },
+            info.name.replace('/', "_")
+        ));
+        std::fs::write(&temp_path, &bytes).map_err(|e| crate::err::with_detail("preview_temp_failed", e))?;
+        let temp_str = temp_path.to_string_lossy().to_string();
+        let cleanup = temp_path.clone();
+        let preview = tokio::task::spawn_blocking(move || get_file_preview_sync(temp_str))
+            .await
+            .map_err(|e| crate::err::with_detail("task_join_failed", e))??;
+        let _ = std::fs::remove_file(cleanup);
+        return Ok(FilePreviewInfo {
+            metadata: FileMetadata {
+                path: path.clone(),
+                ..preview.metadata
+            },
+            ..preview
+        });
+    }
+
     tokio::task::spawn_blocking(move || get_file_preview_sync(path))
         .await
         .map_err(|e| crate::err::with_detail("task_join_failed", e))?
+}
+
+fn remote_metadata_only_preview(path: &str, info: &crate::commands::remote::RemoteDirEntry) -> FilePreviewInfo {
+    let extension = Path::new(&info.name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mime_type = get_mime_type(&extension);
+    FilePreviewInfo {
+        preview_type: "unsupported".to_string(),
+        content: None,
+        metadata: FileMetadata {
+            name: info.name.clone(),
+            path: path.to_string(),
+            size: info.size,
+            size_formatted: info.size_formatted.clone(),
+            modified_time: "Unknown".to_string(),
+            created_time: "Unknown".to_string(),
+            extension,
+            mime_type,
+        },
+    }
 }
 
 fn get_file_preview_sync(path: String) -> Result<FilePreviewInfo, String> {
@@ -403,6 +502,14 @@ pub struct RenameResult {
 #[tauri::command]
 pub fn rename_file(old_path: String, new_name: String) -> Result<RenameResult, String> {
     crate::path_util::validate_user_path(&old_path)?;
+    if crate::path_util::is_remote_path(&old_path) {
+        return Ok(RenameResult {
+            success: false,
+            new_path: String::new(),
+            new_name: String::new(),
+            error: Some(crate::err::code("rename_remote_unsupported")),
+        });
+    }
     let old_path = Path::new(&old_path);
     
     // 检查原路径是否存在

@@ -266,7 +266,7 @@ export const Settings: React.FC = () => {
                     min={1}
                     max={10}
                     value={settings.defaultExpandLevel}
-                    onChange={(value) => updateSettings({ defaultExpandLevel: value || 2 })}
+                    onChange={(value) => updateSettings({ defaultExpandLevel: value || 1 })}
                     style={{ width: '100%' }}
                   />
                 </Form.Item>
@@ -443,9 +443,13 @@ export const Settings: React.FC = () => {
                 <Form.Item label={t('settings.transferConcurrency')}>
                   <InputNumber
                     min={1}
-                    max={2}
+                    max={8}
                     value={settings.transferConcurrency}
-                    onChange={(value) => updateSettings({ transferConcurrency: value || 1 })}
+                    onChange={(value) => {
+                      const max = value || 1;
+                      updateSettings({ transferConcurrency: max });
+                      void invoke('set_transfer_concurrency', { max }).catch(() => undefined);
+                    }}
                     style={{ width: '100%' }}
                   />
                 </Form.Item>

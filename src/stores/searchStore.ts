@@ -304,6 +304,13 @@ export const useSearchStore = create<SearchState>((set, get) => ({
       }
     }
 
+    const searchRetryPayload = {
+      action: 'search' as const,
+      query: query.trim(),
+      searchPaths: [...searchPaths],
+      mode: get().mode,
+    };
+
     let jobId = 0;
     let taskId = '';
     try {
@@ -319,6 +326,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
         progress: { current: 0, total: 0, percentage: 0 },
         startedAt: Date.now(),
         cancellable: true,
+        retryPayload: searchRetryPayload,
       });
     } catch (err) {
       set({ error: mapBackendError(err), statusKind: 'error', loading: false });
@@ -335,12 +343,46 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     }, timeoutMs);
 
     try {
-      const response = await invoke<SearchResponse>('search_files', {
-        paths: searchPaths,
-        query: query.trim(),
-        options: mergedOptions,
-        jobId,
-      });
+      // Filename-only local search: prefer SQLite index (skip remote roots in index path).
+      const useIndex =
+        mergedOptions.search_filename &&
+        !mergedOptions.search_content &&
+        searchPaths.some((p) => !p.startsWith('remote://'));
+
+      let response: SearchResponse;
+      if (useIndex) {
+        const localRoots = searchPaths.filter((p) => !p.startsWith('remote://'));
+        const remoteRoots = searchPaths.filter((p) => p.startsWith('remote://'));
+        const indexed = await invoke<SearchResponse>('search_index_filename', {
+          query: query.trim(),
+          roots: localRoots,
+          limit: 5000,
+        });
+        if (remoteRoots.length > 0) {
+          const remote = await invoke<SearchResponse>('search_files', {
+            paths: remoteRoots,
+            query: query.trim(),
+            options: { ...mergedOptions, search_content: false },
+            jobId,
+          });
+          response = {
+            matched: [...indexed.matched, ...remote.matched],
+            unmatched: [...(indexed.unmatched || []), ...(remote.unmatched || [])],
+            totalScanned: (indexed.totalScanned || 0) + (remote.totalScanned || 0),
+            cancelled: Boolean(indexed.cancelled || remote.cancelled),
+            truncated: Boolean(indexed.truncated || remote.truncated),
+          };
+        } else {
+          response = indexed;
+        }
+      } else {
+        response = await invoke<SearchResponse>('search_files', {
+          paths: searchPaths,
+          query: query.trim(),
+          options: mergedOptions,
+          jobId,
+        });
+      }
 
       if (get().requestId !== requestId) return;
 
@@ -386,12 +428,21 @@ export const useSearchStore = create<SearchState>((set, get) => ({
           .getState()
           .completeTask(
             taskId,
-            response.cancelled ? 'cancelled' : 'completed'
+            response.cancelled ? 'cancelled' : 'completed',
+            undefined,
+            searchRetryPayload
           );
       }
     } catch (err) {
       if (taskId) {
-        useTaskStore.getState().completeTask(taskId, timedOut ? 'cancelled' : 'failed', mapBackendError(err));
+        useTaskStore
+          .getState()
+          .completeTask(
+            taskId,
+            timedOut ? 'cancelled' : 'failed',
+            mapBackendError(err),
+            searchRetryPayload
+          );
       }
       if (get().requestId !== requestId) return;
       set({
@@ -443,10 +494,30 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     const mergedOptions = buildOptionsWithSettings(options);
     const { settings } = useSettingsStore.getState();
 
+    const checkRetryPayload = {
+      action: 'checkKeywords' as const,
+      query: query.trim(),
+      searchPaths: [...searchPaths],
+      keywords,
+    };
+
     let jobId = 0;
+    let taskId = '';
     try {
       jobId = await invoke<number>('prepare_search');
       activeSearchJobId = jobId;
+      taskId = makeTaskId('search', jobId);
+      useTaskStore.getState().upsertTask({
+        id: taskId,
+        kind: 'search',
+        title: query.trim(),
+        status: 'running',
+        backendJobId: jobId,
+        progress: { current: 0, total: 0, percentage: 0 },
+        startedAt: Date.now(),
+        cancellable: true,
+        retryPayload: checkRetryPayload,
+      });
     } catch (err) {
       set({ error: mapBackendError(err), statusKind: 'error', loading: false });
       return;
@@ -501,7 +572,27 @@ export const useSearchStore = create<SearchState>((set, get) => ({
         statusKind,
         error: error ? error + (response.cancelled ? truncatedHint(response.truncated) : '') : null,
       });
+      if (taskId) {
+        useTaskStore
+          .getState()
+          .completeTask(
+            taskId,
+            response.cancelled ? 'cancelled' : 'completed',
+            undefined,
+            checkRetryPayload
+          );
+      }
     } catch (err) {
+      if (taskId) {
+        useTaskStore
+          .getState()
+          .completeTask(
+            taskId,
+            timedOut ? 'cancelled' : 'failed',
+            mapBackendError(err),
+            checkRetryPayload
+          );
+      }
       if (get().requestId !== requestId) return;
       set({
         error: timedOut

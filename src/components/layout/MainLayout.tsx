@@ -15,6 +15,7 @@ import {
   FilterOutlined,
   RetweetOutlined,
   SwapOutlined,
+  DeleteOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { DiskOverview } from '../disk';
@@ -29,6 +30,7 @@ import { TaskCenter, TaskBridge } from '../tasks';
 import { RuleFilter } from '../rules';
 import { OrganizePanel } from '../organize';
 import { SyncPanel } from '../sync';
+import { TrashPanel } from '../trash';
 import { useSettingsStore, useTaskStore } from '../../stores';
 
 const { Sider, Content } = Layout;
@@ -46,6 +48,7 @@ type MenuKey =
   | 'rules'
   | 'organize'
   | 'sync'
+  | 'trash'
   | 'settings';
 
 const getSystemPrefersDark = () =>
@@ -74,6 +77,7 @@ export const MainLayout: React.FC = () => {
       'rules',
       'organize',
       'sync',
+      'trash',
       'settings',
     ];
     return (allowed as string[]).includes(page) ? (page as MenuKey) : 'disk';
@@ -136,6 +140,7 @@ export const MainLayout: React.FC = () => {
         { key: 'rules', icon: <FilterOutlined />, label: t('menu.rules') },
         { key: 'organize', icon: <RetweetOutlined />, label: t('menu.organize') },
         { key: 'sync', icon: <SwapOutlined />, label: t('menu.sync') },
+        { key: 'trash', icon: <DeleteOutlined />, label: t('menu.trash') },
       ],
     },
     {
@@ -184,6 +189,8 @@ export const MainLayout: React.FC = () => {
         return <OrganizePanel />;
       case 'sync':
         return <SyncPanel />;
+      case 'trash':
+        return <TrashPanel />;
       case 'tasks':
         return <TaskCenter />;
       case 'settings':

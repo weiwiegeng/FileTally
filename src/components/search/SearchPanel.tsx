@@ -270,7 +270,7 @@ export const SearchPanel: React.FC = () => {
       let total = 0;
       for (const root of searchPaths) {
         if (root.startsWith('remote://')) continue;
-        const n = await invoke<number>('index_root', { root });
+        const n = await invoke<number>('index_root_incremental', { root });
         total += n;
       }
       message.success(t('search.panel.indexDone', { count: total }));

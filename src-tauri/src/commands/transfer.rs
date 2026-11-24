@@ -66,10 +66,29 @@ pub struct TransferProgress {
 /// Global soft bandwidth cap (bytes/sec). 0 = unlimited.
 static TRANSFER_BANDWIDTH_BPS: AtomicU64 = AtomicU64::new(0);
 
+/// Max parallel top-level transfer streams (remote + queue hint). Clamped 1..=8.
+static TRANSFER_MAX_CONCURRENCY: AtomicU64 = AtomicU64::new(1);
+
 #[tauri::command]
 pub fn set_transfer_bandwidth_limit(bytes_per_sec: u64) -> Result<(), String> {
     TRANSFER_BANDWIDTH_BPS.store(bytes_per_sec, Ordering::SeqCst);
     Ok(())
+}
+
+#[tauri::command]
+pub fn set_transfer_concurrency(max: u64) -> Result<(), String> {
+    let n = max.clamp(1, 8);
+    TRANSFER_MAX_CONCURRENCY.store(n, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_transfer_concurrency() -> Result<u64, String> {
+    Ok(TRANSFER_MAX_CONCURRENCY.load(Ordering::SeqCst).max(1))
+}
+
+pub(crate) fn transfer_concurrency() -> u64 {
+    TRANSFER_MAX_CONCURRENCY.load(Ordering::SeqCst).clamp(1, 8)
 }
 
 fn throttle_after_chunk(chunk_len: usize) {
@@ -98,8 +117,17 @@ fn begin_transfer_job() -> u64 {
     TRANSFER_JOB_ID.fetch_add(1, Ordering::SeqCst) + 1
 }
 
-fn is_cancelled(job_id: u64) -> bool {
+pub(crate) fn is_transfer_cancelled(job_id: u64) -> bool {
     TRANSFER_CANCEL_ID.load(Ordering::SeqCst) == job_id
+}
+
+fn is_cancelled(job_id: u64) -> bool {
+    is_transfer_cancelled(job_id)
+}
+
+#[tauri::command]
+pub fn get_transfer_bandwidth_limit() -> Result<u64, String> {
+    Ok(TRANSFER_BANDWIDTH_BPS.load(Ordering::SeqCst))
 }
 
 /// 预分配传输 job id
@@ -291,7 +319,14 @@ fn restore_backups(backups: &[BackupPair]) {
 
 /// Chunked copy that observes cancel between chunks (large files).
 /// Any failure after `dst` is created removes the partial file.
-fn copy_file_cancellable(src: &Path, dst: &Path, job_id: u64) -> std::io::Result<()> {
+fn copy_file_cancellable(
+    src: &Path,
+    dst: &Path,
+    job_id: u64,
+    allow_resume: bool,
+) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+
     if is_cancelled(job_id) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
@@ -301,8 +336,30 @@ fn copy_file_cancellable(src: &Path, dst: &Path, job_id: u64) -> std::io::Result
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
+
+    let src_len = fs::metadata(src)?.len();
+    let mut resume_at = 0u64;
+    if allow_resume && dst.exists() && dst.is_file() {
+        let dst_len = fs::metadata(dst)?.len();
+        if dst_len == src_len {
+            return Ok(());
+        }
+        if dst_len < src_len {
+            resume_at = dst_len;
+        } else {
+            let _ = fs::remove_file(dst);
+        }
+    }
+
     let mut reader = File::open(src)?;
-    let mut writer = File::create(dst)?;
+    if resume_at > 0 {
+        reader.seek(SeekFrom::Start(resume_at))?;
+    }
+    let mut writer = if resume_at > 0 {
+        std::fs::OpenOptions::new().append(true).open(dst)?
+    } else {
+        File::create(dst)?
+    };
     let mut buf = vec![0u8; COPY_CHUNK_SIZE];
     let copy_result = (|| -> std::io::Result<()> {
         loop {
@@ -322,7 +379,7 @@ fn copy_file_cancellable(src: &Path, dst: &Path, job_id: u64) -> std::io::Result
         writer.flush()?;
         Ok(())
     })();
-    if copy_result.is_err() {
+    if copy_result.is_err() && resume_at == 0 {
         drop(writer);
         let _ = fs::remove_file(dst);
     }
@@ -543,13 +600,19 @@ pub async fn check_transfer_conflicts(
     if crate::path_util::is_remote_path(&target_path) {
         let mut conflicts = Vec::new();
         for source_path in &source_paths {
-            let name = Path::new(source_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown");
+            let name = if crate::path_util::is_remote_path(source_path) {
+                let (_, rel) = crate::path_util::parse_remote_path(source_path)?;
+                rel.rsplit('/').next().unwrap_or(&rel).to_string()
+            } else {
+                Path::new(source_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string()
+            };
             let (conn_id, rel) = crate::path_util::parse_remote_path(&target_path)?;
             let child = if rel.is_empty() {
-                name.to_string()
+                name.clone()
             } else {
                 format!("{rel}/{name}")
             };
@@ -558,14 +621,28 @@ pub async fn check_transfer_conflicts(
                 .await
                 .unwrap_or(false)
             {
+                let source_size = if crate::path_util::is_remote_path(source_path) {
+                    crate::commands::remote::remote_path_info(store.clone(), source_path.clone())
+                        .await
+                        .map(|i| i.size)
+                        .unwrap_or(0)
+                } else if Path::new(source_path).is_file() {
+                    fs::metadata(source_path).map(|m| m.len()).unwrap_or(0)
+                } else {
+                    calculate_dir_size(Path::new(source_path))
+                };
+                let target_size = crate::commands::remote::remote_path_info(store.clone(), child_path.clone())
+                    .await
+                    .map(|i| i.size)
+                    .unwrap_or(0);
                 conflicts.push(ConflictFile {
                     source_path: source_path.clone(),
                     target_path: child_path,
-                    file_name: name.to_string(),
-                    source_size: 0,
-                    target_size: 0,
-                    source_size_formatted: String::new(),
-                    target_size_formatted: String::new(),
+                    file_name: name,
+                    source_size,
+                    target_size,
+                    source_size_formatted: format_size(source_size),
+                    target_size_formatted: format_size(target_size),
                 });
             }
         }
@@ -587,43 +664,58 @@ pub async fn check_transfer_conflicts(
     let mut conflicts = Vec::new();
 
     for source_path in &source_paths {
-        let source = Path::new(source_path);
-
-        if !source.exists() {
-            continue;
-        }
-
-        let file_name = source
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let source_is_remote = crate::path_util::is_remote_path(source_path);
+        let file_name = if source_is_remote {
+            let (_, rel) = crate::path_util::parse_remote_path(source_path)?;
+            rel.rsplit('/').next().unwrap_or(&rel).to_string()
+        } else {
+            let source = Path::new(source_path);
+            if !source.exists() {
+                continue;
+            }
+            source
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        };
 
         let target_file_path = target_dir.join(&file_name);
 
-        if target_file_path.exists() {
-            let source_size = if source.is_file() {
+        let target_exists = target_file_path.exists();
+        if !target_exists {
+            continue;
+        }
+
+        let source_size = if source_is_remote {
+            crate::commands::remote::remote_path_info(store.clone(), source_path.clone())
+                .await
+                .map(|i| i.size)
+                .unwrap_or(0)
+        } else {
+            let source = Path::new(source_path);
+            if source.is_file() {
                 fs::metadata(source).map(|m| m.len()).unwrap_or(0)
             } else {
                 calculate_dir_size(source)
-            };
+            }
+        };
 
-            let target_size = if target_file_path.is_file() {
-                fs::metadata(&target_file_path).map(|m| m.len()).unwrap_or(0)
-            } else {
-                calculate_dir_size(&target_file_path)
-            };
+        let target_size = if target_file_path.is_file() {
+            fs::metadata(&target_file_path).map(|m| m.len()).unwrap_or(0)
+        } else {
+            calculate_dir_size(&target_file_path)
+        };
 
-            conflicts.push(ConflictFile {
-                source_path: source_path.clone(),
-                target_path: target_file_path.to_string_lossy().to_string(),
-                file_name,
-                source_size,
-                target_size,
-                source_size_formatted: format_size(source_size),
-                target_size_formatted: format_size(target_size),
-            });
-        }
+        conflicts.push(ConflictFile {
+            source_path: source_path.clone(),
+            target_path: target_file_path.to_string_lossy().to_string(),
+            file_name,
+            source_size,
+            target_size,
+            source_size_formatted: format_size(source_size),
+            target_size_formatted: format_size(target_size),
+        });
     }
 
     Ok(CheckConflictsResponse {
@@ -683,18 +775,30 @@ pub async fn transfer_files(
     target_path: String,
     conflict_resolution: String,
     job_id: Option<u64>,
+    max_concurrency: Option<u64>,
 ) -> Result<TransferResult, String> {
+    if let Some(n) = max_concurrency {
+        let _ = set_transfer_concurrency(n);
+    }
+
     let involves_remote = crate::path_util::is_remote_path(&target_path)
         || source_paths
             .iter()
             .any(|p| crate::path_util::is_remote_path(p));
 
     if involves_remote {
+        let resolved_job = match job_id {
+            Some(id) if id > 0 => id,
+            _ => begin_transfer_job(),
+        };
         return crate::commands::remote::transfer_files_remote(
+            app,
             store,
             source_paths,
             target_path,
             conflict_resolution,
+            Some(resolved_job),
+            Some(transfer_concurrency()),
         )
         .await;
     }
@@ -873,7 +977,7 @@ fn transfer_files_sync(
                     message: String::new(),
                 },
             );
-            copy_file_cancellable(source, &copy_dest, job_id)
+            copy_file_cancellable(source, &copy_dest, job_id, resolution == "overwrite")
         } else {
             copy_dir_recursive_with_progress(
                 source,
@@ -1236,7 +1340,8 @@ fn copy_dir_recursive_with_progress(
                 },
             );
 
-            if let Err(e) = copy_file_cancellable(&src_path, &copy_dest, job_id) {
+            let allow_resume = resolution == "overwrite";
+            if let Err(e) = copy_file_cancellable(&src_path, &copy_dest, job_id, allow_resume) {
                 if let Some(ref staging_path) = staging {
                     let _ = remove_path(staging_path);
                 }

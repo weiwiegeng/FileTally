@@ -13,6 +13,8 @@ import {
   Tag,
   List,
   message,
+  Checkbox,
+  Modal,
 } from 'antd';
 import { mapBackendError } from '../../utils/backendError';
 import {
@@ -48,6 +50,9 @@ export const CleanupSuggestionTab: React.FC = () => {
   const { t } = useTranslation();
   const [aiInsight, setAiInsight] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<{ toTrash: boolean } | null>(null);
   const isAIConfigured = Boolean(
     settings.aiConfig.apiKey || settings.aiConfig.provider === 'ollama'
   );
@@ -173,6 +178,61 @@ export const CleanupSuggestionTab: React.FC = () => {
     return `${size} B`;
   };
 
+  const togglePath = (path: string, checked: boolean) => {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(path);
+      else next.delete(path);
+      return next;
+    });
+  };
+
+  const toggleCategoryAll = (items: CleanupItem[], checked: boolean) => {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      items.forEach((i) => {
+        if (checked) next.add(i.path);
+        else next.delete(i.path);
+      });
+      return next;
+    });
+  };
+
+  const runDelete = async (toTrash: boolean) => {
+    const paths = Array.from(selectedPaths);
+    if (!paths.length) return;
+    setDeleteLoading(true);
+    try {
+      const result = await invoke<{ deleted: number; failed: number; errors: string[] }>(
+        'delete_cleanup_items',
+        { paths, toTrash }
+      );
+      message.success(
+        t('analysis.cleanup.deleteDone', { deleted: result.deleted, failed: result.failed })
+      );
+      setSelectedPaths(new Set());
+      await handleScan();
+    } catch (err) {
+      message.error(mapBackendError(err));
+    } finally {
+      setDeleteLoading(false);
+      setPendingDelete(null);
+    }
+  };
+
+  const handleUndo = async () => {
+    setDeleteLoading(true);
+    try {
+      const result = await invoke<{ restored: number; failed: number }>('undo_cleanup_delete');
+      message.success(t('analysis.cleanup.undoDone', { restored: result.restored, failed: result.failed }));
+      await handleScan();
+    } catch (err) {
+      message.error(mapBackendError(err));
+    } finally {
+      setDeleteLoading(false);
+    }
+  };
+
   const renderCleanupList = (items: CleanupItem[], category: string, title: string, icon: React.ReactNode) => {
     if (items.length === 0) return null;
     
@@ -182,6 +242,14 @@ export const CleanupSuggestionTab: React.FC = () => {
       <Card
         title={
           <Space>
+            <Checkbox
+              checked={items.length > 0 && items.every((i) => selectedPaths.has(i.path))}
+              indeterminate={
+                items.some((i) => selectedPaths.has(i.path)) &&
+                !items.every((i) => selectedPaths.has(i.path))
+              }
+              onChange={(e) => toggleCategoryAll(items, e.target.checked)}
+            />
             {icon}
             <span>{title}</span>
             <Tag color={getCategoryColor(category)}>{formatSize(totalSize)}</Tag>
@@ -199,6 +267,11 @@ export const CleanupSuggestionTab: React.FC = () => {
                 borderBottom: `1px solid ${colors.border}`,
               }}
             >
+              <Checkbox
+                checked={selectedPaths.has(item.path)}
+                onChange={(e) => togglePath(item.path, e.target.checked)}
+                style={{ marginRight: 8 }}
+              />
               <List.Item.Meta
                 avatar={getCategoryIcon(item.category)}
                 title={
@@ -245,14 +318,60 @@ export const CleanupSuggestionTab: React.FC = () => {
             <Button
               onClick={() => {
                 setAiInsight('');
+                setSelectedPaths(new Set());
                 clearCleanupSuggestion();
               }}
             >
               {t('analysis.cleanup.clearResults')}
             </Button>
+            <Button
+              disabled={selectedPaths.size === 0}
+              loading={deleteLoading}
+              onClick={() => setPendingDelete({ toTrash: true })}
+            >
+              {t('analysis.cleanup.moveToTrash')}
+            </Button>
+            <Button
+              danger
+              disabled={selectedPaths.size === 0}
+              loading={deleteLoading}
+              onClick={() => setPendingDelete({ toTrash: false })}
+            >
+              {t('analysis.cleanup.deletePermanent')}
+            </Button>
+            <Button onClick={() => void handleUndo()} loading={deleteLoading}>
+              {t('analysis.cleanup.undoLast')}
+            </Button>
+            {selectedPaths.size > 0 && (
+              <Tag color="blue">
+                {t('analysis.cleanup.selectedCount', { count: selectedPaths.size })}
+              </Tag>
+            )}
           </>
         )}
       </Space>
+
+      <Modal
+        open={pendingDelete !== null}
+        title={
+          pendingDelete?.toTrash
+            ? t('analysis.cleanup.confirmTrashTitle')
+            : t('analysis.cleanup.confirmPermanentTitle')
+        }
+        okText={t('analysis.cleanup.confirmOk')}
+        cancelText={t('analysis.cleanup.confirmCancel')}
+        okButtonProps={{ danger: !pendingDelete?.toTrash, loading: deleteLoading }}
+        onCancel={() => setPendingDelete(null)}
+        onOk={() => {
+          if (pendingDelete) void runDelete(pendingDelete.toTrash);
+        }}
+      >
+        <Text>
+          {pendingDelete?.toTrash
+            ? t('analysis.cleanup.confirmTrashBody', { count: selectedPaths.size })
+            : t('analysis.cleanup.confirmPermanentBody', { count: selectedPaths.size })}
+        </Text>
+      </Modal>
 
       {/* 扫描结果 */}
       {cleanupLoading ? (

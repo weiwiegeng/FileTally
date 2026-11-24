@@ -53,6 +53,8 @@ export const SyncPanel: React.FC = () => {
   const [deleteExtra, setDeleteExtra] = useState(false);
   const [diff, setDiff] = useState<SyncCompareResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [kindFilter, setKindFilter] = useState<'all' | 'added' | 'changed' | 'extra'>('all');
+  const [comparedOnce, setComparedOnce] = useState(false);
 
   useEffect(() => {
     let u: UnlistenFn | undefined;
@@ -102,6 +104,8 @@ export const SyncPanel: React.FC = () => {
     try {
       const result = await invoke<SyncCompareResult>('compare_sync', { source, dest: target });
       setDiff(result);
+      setComparedOnce(true);
+      setKindFilter('all');
     } catch (e) {
       message.error(mapBackendError(e));
     } finally {
@@ -146,14 +150,15 @@ export const SyncPanel: React.FC = () => {
     }
   };
 
-  const rows = useMemo(
-    () => [
-      ...(diff?.added || []).map((x) => ({ ...x, kind: t('sync.added'), kindKey: 'added' })),
-      ...(diff?.changed || []).map((x) => ({ ...x, kind: t('sync.changed'), kindKey: 'changed' })),
-      ...(diff?.extra || []).map((x) => ({ ...x, kind: t('sync.extra'), kindKey: 'extra' })),
-    ],
-    [diff, t]
-  );
+  const rows = useMemo(() => {
+    const all = [
+      ...(diff?.added || []).map((x) => ({ ...x, kind: t('sync.added'), kindKey: 'added' as const })),
+      ...(diff?.changed || []).map((x) => ({ ...x, kind: t('sync.changed'), kindKey: 'changed' as const })),
+      ...(diff?.extra || []).map((x) => ({ ...x, kind: t('sync.extra'), kindKey: 'extra' as const })),
+    ];
+    if (kindFilter === 'all') return all;
+    return all.filter((r) => r.kindKey === kindFilter);
+  }, [diff, t, kindFilter]);
 
   const kindColor = (key: string) => {
     if (key === 'added') return 'green';
@@ -271,10 +276,16 @@ export const SyncPanel: React.FC = () => {
             },
           }}
         >
-          {rows.length === 0 ? (
+          {!comparedOnce ? (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={t('rules.empty')}
+              description={t('sync.emptyHint')}
+              style={{ margin: 'auto' }}
+            />
+          ) : rows.length === 0 && kindFilter === 'all' && !diff?.added.length && !diff?.changed.length && !diff?.extra.length ? (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description={t('sync.noDiff')}
               style={{ margin: 'auto' }}
             />
           ) : (
@@ -290,30 +301,53 @@ export const SyncPanel: React.FC = () => {
                   <Statistic title={t('sync.extra')} value={diff?.extra.length || 0} />
                 </Col>
               </Row>
-              <Table
-                size="small"
-                rowKey={(r) => `${r.kindKey}-${r.relativePath}`}
-                dataSource={rows}
-                pagination={{ pageSize: 40, showSizeChanger: true }}
-                scroll={{ y: 'calc(100vh - 520px)' }}
-                columns={[
-                  {
-                    title: t('sync.colKind'),
-                    dataIndex: 'kind',
-                    width: 100,
-                    render: (label: string, row: (typeof rows)[number]) => (
-                      <Tag color={kindColor(row.kindKey)}>{label}</Tag>
-                    ),
-                  },
-                  { title: t('sync.colPath'), dataIndex: 'relativePath', ellipsis: true },
-                  {
-                    title: t('sync.colSize'),
-                    dataIndex: 'size',
-                    width: 110,
-                    render: (s: number) => formatSize(s || 0),
-                  },
-                ]}
-              />
+              <div style={{ padding: '8px 16px', borderBottom: `1px solid ${colors.border}` }}>
+                <Space wrap>
+                  <Text type="secondary">{t('sync.filterKind')}</Text>
+                  {(['all', 'added', 'changed', 'extra'] as const).map((k) => (
+                    <Tag
+                      key={k}
+                      color={kindFilter === k ? 'blue' : 'default'}
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => setKindFilter(k)}
+                    >
+                      {t(`sync.filter.${k}`)}
+                    </Tag>
+                  ))}
+                </Space>
+              </div>
+              {rows.length === 0 ? (
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description={t('sync.filterEmpty')}
+                  style={{ margin: '24px auto' }}
+                />
+              ) : (
+                <Table
+                  size="small"
+                  rowKey={(r) => `${r.kindKey}-${r.relativePath}`}
+                  dataSource={rows}
+                  pagination={{ pageSize: 40, showSizeChanger: true }}
+                  scroll={{ y: 'calc(100vh - 520px)' }}
+                  columns={[
+                    {
+                      title: t('sync.colKind'),
+                      dataIndex: 'kind',
+                      width: 100,
+                      render: (label: string, row: (typeof rows)[number]) => (
+                        <Tag color={kindColor(row.kindKey)}>{label}</Tag>
+                      ),
+                    },
+                    { title: t('sync.colPath'), dataIndex: 'relativePath', ellipsis: true },
+                    {
+                      title: t('sync.colSize'),
+                      dataIndex: 'size',
+                      width: 110,
+                      render: (s: number) => formatSize(s || 0),
+                    },
+                  ]}
+                />
+              )}
             </>
           )}
         </Card>

@@ -54,9 +54,6 @@ export const FolderAnalysisTab: React.FC = () => {
     folderAnalysisLoading,
     folderAnalysisPath,
     setFolderAnalysisPath,
-    analyzeFolderStart,
-    analyzeFolderSuccess,
-    analyzeFolderError,
     clearFolderAnalysis,
   } = useAnalysisStore();
   const { connections } = useRemoteStore();
@@ -112,31 +109,27 @@ export const FolderAnalysisTab: React.FC = () => {
   };
 
   const [activeJobId, setActiveJobId] = useState(0);
+  const [verifyByHash, setVerifyByHash] = useState<
+    Record<string, { confirmed: boolean; hash: string; loading?: boolean }>
+  >({});
+
+  const runFolderAnalysis = useAnalysisStore((s) => s.runFolderAnalysis);
 
   const handleAnalyze = async () => {
     if (!folderAnalysisPath) return;
-    
+
     setProgress(null);
     setAiInsight('');
-    analyzeFolderStart();
     try {
-      const jobId = await invoke<number>('prepare_analysis');
-      setActiveJobId(jobId);
-      const result = await invoke<FolderAnalysisResult>('analyze_folder', {
-        path: folderAnalysisPath,
-        largeFileThresholdMb: 100,
-        oldFileDays: 180,
-        jobId,
-      });
-      analyzeFolderSuccess(result);
+      await runFolderAnalysis();
       setProgress(null);
       setActiveJobId(0);
-      if (result.truncated) {
+      const result = useAnalysisStore.getState().folderAnalysis;
+      if (result?.truncated) {
         message.warning(t('analysis.folder.truncatedWarning'));
       }
     } catch (err) {
       console.error('analyze failed:', err);
-      analyzeFolderError();
       setProgress(null);
       setActiveJobId(0);
       message.error(t('analysis.folder.analyzeFailed', { error: mapBackendError(err) }));
@@ -253,6 +246,31 @@ export const FolderAnalysisTab: React.FC = () => {
   ];
 
   // 重复文件表格列
+  const handleVerifyGroup = async (hash: string, paths: string[]) => {
+    setVerifyByHash((m) => ({ ...m, [hash]: { confirmed: false, hash: '', loading: true } }));
+    try {
+      const result = await invoke<{ confirmed: boolean; hash: string }>('verify_duplicate_files', {
+        paths,
+      });
+      setVerifyByHash((m) => ({
+        ...m,
+        [hash]: { confirmed: result.confirmed, hash: result.hash, loading: false },
+      }));
+      message.success(
+        result.confirmed
+          ? t('analysis.folder.verifyConfirmed')
+          : t('analysis.folder.verifyMismatch')
+      );
+    } catch (err) {
+      setVerifyByHash((m) => {
+        const next = { ...m };
+        delete next[hash];
+        return next;
+      });
+      message.error(mapBackendError(err));
+    }
+  };
+
   const duplicateColumns = [
     {
       title: t('analysis.folder.colDuplicateSize'),
@@ -275,6 +293,32 @@ export const FolderAnalysisTab: React.FC = () => {
           {formatSize(record.size * (record.files.length - 1))}
         </Text>
       ),
+    },
+    {
+      title: t('analysis.folder.colVerify'),
+      key: 'verify',
+      width: 200,
+      render: (_: unknown, record: { hash: string; files: string[] }) => {
+        const v = verifyByHash[record.hash];
+        return (
+          <Space direction="vertical" size={2}>
+            <Button
+              size="small"
+              loading={v?.loading}
+              onClick={() => void handleVerifyGroup(record.hash, record.files)}
+            >
+              {t('analysis.folder.verifyHashes')}
+            </Button>
+            {v && !v.loading ? (
+              <Tag color={v.confirmed ? 'success' : 'error'}>
+                {v.confirmed
+                  ? t('analysis.folder.verifyConfirmedShort')
+                  : t('analysis.folder.verifyMismatchShort')}
+              </Tag>
+            ) : null}
+          </Space>
+        );
+      },
     },
   ];
 

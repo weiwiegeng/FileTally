@@ -14,9 +14,16 @@ import {
   StopOutlined,
   DeleteOutlined,
   ClearOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useTaskStore, type AppTask, type TaskStatus } from '../../stores/taskStore';
+import {
+  useTransferStore,
+  useSearchStore,
+  useAnalysisStore,
+  type ConflictResolution,
+} from '../../stores';
 import { useThemeColors } from '../../hooks';
 
 const { Title, Text } = Typography;
@@ -46,6 +53,67 @@ export const TaskCenter: React.FC = () => {
     () => tasks.filter((x) => x.status === 'running' || x.status === 'queued').length,
     [tasks]
   );
+
+  const retryTask = (row: AppTask) => {
+    const p = row.retryPayload;
+    if (!p || typeof p.action !== 'string') return;
+
+    switch (p.action) {
+      case 'transfer': {
+        const {
+          setTargetPath,
+          clearSourceItems,
+          addSourceItems,
+          startTransfer,
+        } = useTransferStore.getState();
+        if (typeof p.targetPath === 'string') {
+          setTargetPath(p.targetPath);
+        }
+        if (Array.isArray(p.sourcePaths) && p.sourcePaths.length > 0) {
+          clearSourceItems();
+          addSourceItems(
+            (p.sourcePaths as string[]).map((sourcePath) => {
+              const name = sourcePath.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || sourcePath;
+              return {
+                id: Math.random().toString(36).slice(2, 11),
+                sourcePath,
+                fileName: name,
+                fileType: 'file' as const,
+                size: 0,
+                sizeFormatted: '—',
+              };
+            })
+          );
+        }
+        void startTransfer((p.resolution as ConflictResolution) || 'skip');
+        break;
+      }
+      case 'search': {
+        const store = useSearchStore.getState();
+        if (typeof p.query === 'string') store.setQuery(p.query);
+        if (Array.isArray(p.searchPaths)) store.setSearchPaths(p.searchPaths as string[]);
+        store.setMode('normal');
+        void store.search();
+        break;
+      }
+      case 'checkKeywords': {
+        const store = useSearchStore.getState();
+        if (typeof p.query === 'string') store.setQuery(p.query);
+        if (Array.isArray(p.searchPaths)) store.setSearchPaths(p.searchPaths as string[]);
+        store.setMode('keyword-check');
+        void store.checkKeywords();
+        break;
+      }
+      case 'analyzeFolder': {
+        const store = useAnalysisStore.getState();
+        if (typeof p.path === 'string') store.setFolderAnalysisPath(p.path);
+        void store.runFolderAnalysis();
+        break;
+      }
+      default:
+        break;
+    }
+  };
 
   const columns = [
     {
@@ -99,7 +167,7 @@ export const TaskCenter: React.FC = () => {
     },
     {
       title: t('tasks.colActions'),
-      width: 120,
+      width: 150,
       render: (_: unknown, row: AppTask) => (
         <Space>
           {(row.status === 'running' || row.status === 'queued') && row.cancellable ? (
@@ -111,6 +179,23 @@ export const TaskCenter: React.FC = () => {
                 onClick={() => void cancelTask(row.id)}
               />
             </Tooltip>
+          ) : row.status === 'failed' && row.retryPayload ? (
+            <>
+              <Tooltip title={t('tasks.retry')}>
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  onClick={() => retryTask(row)}
+                />
+              </Tooltip>
+              <Tooltip title={t('tasks.remove')}>
+                <Button
+                  size="small"
+                  icon={<DeleteOutlined />}
+                  onClick={() => removeTask(row.id)}
+                />
+              </Tooltip>
+            </>
           ) : (
             <Tooltip title={t('tasks.remove')}>
               <Button

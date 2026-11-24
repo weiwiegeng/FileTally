@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use smb2::{DirectoryEntry, SmbClient};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
 use crate::err;
@@ -61,6 +61,15 @@ pub struct RemoteDirEntry {
     pub is_dir: bool,
     pub size: u64,
     pub size_formatted: String,
+}
+
+const REMOTE_LIST_CACHE_TTL: Duration = Duration::from_secs(30);
+
+static REMOTE_LIST_CACHE: OnceLock<std::sync::Mutex<HashMap<String, (Instant, Vec<RemoteDirEntry>)>>> =
+    OnceLock::new();
+
+fn remote_list_cache() -> &'static std::sync::Mutex<HashMap<String, (Instant, Vec<RemoteDirEntry>)>> {
+    REMOTE_LIST_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -412,6 +421,15 @@ pub async fn list_remote_dir_inner(
     path: &str,
 ) -> Result<Vec<RemoteDirEntry>, String> {
     path_util::validate_user_path(path)?;
+
+    if let Ok(cache) = remote_list_cache().lock() {
+        if let Some((at, entries)) = cache.get(path) {
+            if at.elapsed() < REMOTE_LIST_CACHE_TTL {
+                return Ok(entries.clone());
+            }
+        }
+    }
+
     let (conn_id, rel) = parse_remote_path(path)?;
 
     let mut guard = store.inner.lock().await;
@@ -422,7 +440,9 @@ pub async fn list_remote_dir_inner(
                 .list_directory(&mut session.share, &rel)
                 .await
                 .map_err(map_smb_err)?;
-            Ok(entries_to_remote(&conn_id, &rel, &entries))
+            let out = entries_to_remote(&conn_id, &rel, &entries);
+            cache_remote_list(path, &out);
+            Ok(out)
         }
         Some(RemoteSession::WebDav {
             inner,
@@ -434,13 +454,23 @@ pub async fn list_remote_dir_inner(
             let password = password.clone();
             drop(guard);
             let entries = super::remote_webdav::webdav_list_dir(&inner, &rel, &username, &password).await?;
-            Ok(simple_entries_to_remote(&conn_id, &rel, &entries))
+            let out = simple_entries_to_remote(&conn_id, &rel, &entries);
+            cache_remote_list(path, &out);
+            Ok(out)
         }
         Some(RemoteSession::Sftp(session)) => {
             let entries = super::remote_sftp::sftp_list_dir(session, &rel)?;
-            Ok(sftp_entries_to_remote(&conn_id, &rel, &entries))
+            let out = sftp_entries_to_remote(&conn_id, &rel, &entries);
+            cache_remote_list(path, &out);
+            Ok(out)
         }
         None => Err(session_missing()),
+    }
+}
+
+fn cache_remote_list(path: &str, entries: &[RemoteDirEntry]) {
+    if let Ok(mut cache) = remote_list_cache().lock() {
+        cache.insert(path.to_string(), (Instant::now(), entries.to_vec()));
     }
 }
 
@@ -1147,73 +1177,175 @@ fn unique_remote_name(rel: &str) -> String {
 /// High-level transfer command that supports remote:// on either side.
 #[tauri::command]
 pub async fn transfer_files_remote(
+    app: AppHandle,
     store: State<'_, Arc<RemoteSessionStore>>,
     source_paths: Vec<String>,
     target_path: String,
     conflict_resolution: String,
+    job_id: Option<u64>,
+    max_concurrency: Option<u64>,
 ) -> Result<crate::commands::transfer::TransferResult, String> {
     let resolution = match conflict_resolution.as_str() {
         "skip" | "rename" | "overwrite" => conflict_resolution.as_str(),
         _ => return Err(err::code("invalid_conflict_resolution")),
     };
 
+    let job_id = job_id.unwrap_or(0);
+    let concurrency = max_concurrency
+        .unwrap_or_else(crate::commands::transfer::transfer_concurrency)
+        .clamp(1, 8) as usize;
+
     path_util::validate_user_path(&target_path)?;
     for p in &source_paths {
         path_util::validate_user_path(p)?;
     }
 
+    let total = source_paths.len() as u64;
+    let _ = app.emit(
+        "transfer-progress",
+        crate::commands::transfer::TransferProgress {
+            current_file: String::new(),
+            current_index: 0,
+            total_files: total,
+            bytes_transferred: 0,
+            total_bytes: 0,
+            stage: "transferring".to_string(),
+            message: String::new(),
+        },
+    );
+
     let target_is_remote = path_util::is_remote_path(&target_path);
+    let store_arc = store.inner().clone();
+    let sem = Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let done = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut handles = Vec::with_capacity(source_paths.len());
+
+    for source in source_paths {
+        if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+            break;
+        }
+        let permit = sem
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| err::with_detail("transfer_concurrency_failed", e))?;
+        let store_arc = store_arc.clone();
+        let target_path = target_path.clone();
+        let resolution = resolution.to_string();
+        let app = app.clone();
+        let done = done.clone();
+        let total_files = total;
+
+        handles.push(tokio::spawn(async move {
+            let _permit = permit;
+            if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+                return Err(err::code("transfer_cancelled"));
+            }
+
+            let source_is_remote = path_util::is_remote_path(&source);
+            let current_name = if source_is_remote {
+                parse_remote_path(&source)
+                    .map(|(_, r)| r.rsplit('/').next().unwrap_or(&r).to_string())
+                    .unwrap_or_else(|_| "remote".into())
+            } else {
+                Path::new(&source)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file")
+                    .to_string()
+            };
+
+            let idx = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let _ = app.emit(
+                "transfer-progress",
+                crate::commands::transfer::TransferProgress {
+                    current_file: current_name,
+                    current_index: idx,
+                    total_files,
+                    bytes_transferred: 0,
+                    total_bytes: 0,
+                    stage: "transferring".to_string(),
+                    message: String::new(),
+                },
+            );
+
+            let result = match (source_is_remote, target_is_remote) {
+                (true, false) => {
+                    transfer_remote_to_local(
+                        store_arc.as_ref(),
+                        &source,
+                        Path::new(&target_path),
+                        &resolution,
+                    )
+                    .await
+                }
+                (false, true) => {
+                    transfer_local_to_remote(
+                        store_arc.as_ref(),
+                        Path::new(&source),
+                        &target_path,
+                        &resolution,
+                    )
+                    .await
+                }
+                (true, true) => Err(err::code("smb_remote_to_remote_unsupported")),
+                (false, false) => Err(err::code("smb_not_remote_transfer")),
+            };
+
+            result
+        }));
+    }
+
     let mut transferred = 0u64;
     let mut skipped = 0u64;
     let mut failed = 0u64;
     let mut errors = Vec::new();
+    let mut cancelled = job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id);
 
-    for source in &source_paths {
-        let source_is_remote = path_util::is_remote_path(source);
-
-        let result = match (source_is_remote, target_is_remote) {
-            (true, false) => {
-                transfer_remote_to_local(
-                    store.as_ref(),
-                    source,
-                    Path::new(&target_path),
-                    resolution,
-                )
-                .await
-            }
-            (false, true) => {
-                transfer_local_to_remote(
-                    store.as_ref(),
-                    Path::new(source),
-                    &target_path,
-                    resolution,
-                )
-                .await
-            }
-            (true, true) => Err(err::code("smb_remote_to_remote_unsupported")),
-            (false, false) => Err(err::code("smb_not_remote_transfer")),
-        };
-
-        match result {
-            Ok((t, s, f, e)) => {
+    for handle in handles {
+        match handle.await {
+            Ok(Ok((t, s, f, e))) => {
                 transferred += t;
                 skipped += s;
                 failed += f;
                 errors.extend(e);
             }
+            Ok(Err(e)) => {
+                if e.contains("transfer_cancelled") || e.contains("cancelled") {
+                    cancelled = true;
+                } else {
+                    failed += 1;
+                    errors.push(e);
+                }
+            }
             Err(e) => {
                 failed += 1;
-                errors.push(e);
+                errors.push(err::with_detail("task_join_failed", e));
             }
         }
     }
 
+    if cancelled {
+        let _ = app.emit(
+            "transfer-progress",
+            crate::commands::transfer::TransferProgress {
+                current_file: String::new(),
+                current_index: total,
+                total_files: total,
+                bytes_transferred: 0,
+                total_bytes: 0,
+                stage: "cancelled".to_string(),
+                message: String::new(),
+            },
+        );
+    }
+
     Ok(crate::commands::transfer::TransferResult {
-        success: failed == 0,
+        success: failed == 0 && !cancelled,
         transferred: transferred as usize,
         skipped: skipped as usize,
         failed: failed as usize,
-        cancelled: false,
+        cancelled,
         truncated: false,
         errors,
     })

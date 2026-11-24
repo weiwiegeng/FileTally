@@ -79,7 +79,7 @@ const defaultSettings: AppSettings = {
   
   // 文件浏览设置
   showHiddenFiles: false,
-  defaultExpandLevel: 2,
+  defaultExpandLevel: 1,
   sortBy: 'name',
   sortOrder: 'asc',
   previewPanelPosition: 'right',
