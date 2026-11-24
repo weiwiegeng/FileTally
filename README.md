@@ -119,4 +119,4 @@ FileTally/
 
 ## License
 
-MIT
+[LGPL-3.0](./LICENSE)
