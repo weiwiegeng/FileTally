@@ -60,32 +60,56 @@ export const TaskCenter: React.FC = () => {
 
     switch (p.action) {
       case 'transfer': {
-        const {
-          setTargetPath,
-          clearSourceItems,
-          addSourceItems,
-          startTransfer,
-        } = useTransferStore.getState();
-        if (typeof p.targetPath === 'string') {
-          setTargetPath(p.targetPath);
-        }
-        if (Array.isArray(p.sourcePaths) && p.sourcePaths.length > 0) {
-          clearSourceItems();
-          addSourceItems(
-            (p.sourcePaths as string[]).map((sourcePath) => {
-              const name = sourcePath.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || sourcePath;
-              return {
-                id: Math.random().toString(36).slice(2, 11),
-                sourcePath,
-                fileName: name,
-                fileType: 'file' as const,
-                size: 0,
-                sizeFormatted: '—',
-              };
-            })
-          );
-        }
-        void startTransfer((p.resolution as ConflictResolution) || 'skip');
+        const { startTransfer } = useTransferStore.getState();
+        const resolution = (p.resolution as ConflictResolution) || 'skip';
+        const rawItems = Array.isArray(p.sourceItems)
+          ? (p.sourceItems as Array<Record<string, unknown>>)
+          : [];
+        const sourceItems =
+          rawItems.length > 0
+            ? rawItems.map((item) => {
+                const sourcePath = String(item.sourcePath || '');
+                const name =
+                  String(item.fileName || '') ||
+                  sourcePath.replace(/[/\\]+$/, '').split(/[/\\]/).pop() ||
+                  sourcePath;
+                return {
+                  id: String(item.id || Math.random().toString(36).slice(2, 11)),
+                  sourcePath,
+                  fileName: name,
+                  fileType: (item.fileType === 'folder' ? 'folder' : 'file') as
+                    | 'file'
+                    | 'folder',
+                  size: typeof item.size === 'number' ? item.size : 0,
+                  sizeFormatted:
+                    typeof item.sizeFormatted === 'string' ? item.sizeFormatted : '—',
+                };
+              })
+            : Array.isArray(p.sourcePaths)
+              ? (p.sourcePaths as string[]).map((sourcePath) => {
+                  const name =
+                    sourcePath.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || sourcePath;
+                  return {
+                    id: Math.random().toString(36).slice(2, 11),
+                    sourcePath,
+                    fileName: name,
+                    fileType: 'file' as const,
+                    size: 0,
+                    sizeFormatted: '—',
+                  };
+                })
+              : [];
+        if (!sourceItems.length || typeof p.targetPath !== 'string') break;
+        void startTransfer(resolution, {
+          resolution,
+          sourceItems,
+          targetPath: p.targetPath,
+          sourceConnectionName:
+            typeof p.sourceConnectionName === 'string' ? p.sourceConnectionName : null,
+          targetConnectionName:
+            typeof p.targetConnectionName === 'string' ? p.targetConnectionName : null,
+          direction: p.direction === 'download' ? 'download' : 'upload',
+        });
         break;
       }
       case 'search': {

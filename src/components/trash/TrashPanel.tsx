@@ -8,6 +8,7 @@ import {
   message,
   Popconfirm,
   Tooltip,
+  Modal,
 } from 'antd';
 import { DeleteOutlined, RestOutlined, ReloadOutlined } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
@@ -32,6 +33,7 @@ export const TrashPanel: React.FC = () => {
   const colors = useThemeColors();
   const [items, setItems] = useState<TrashItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [conflictId, setConflictId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -49,14 +51,24 @@ export const TrashPanel: React.FC = () => {
     void refresh();
   }, [refresh]);
 
-  const restore = async (id: string) => {
+  const restoreWith = async (id: string, conflictResolution: 'rename' | 'overwrite' | 'fail') => {
     try {
-      await invoke('restore_trash_item', { id });
-      message.success(t('trash.restoreOk'));
+      const path = await invoke<string>('restore_trash_item', { id, conflictResolution });
+      setConflictId(null);
+      message.success(t('trash.restoreOk', { path }));
       await refresh();
     } catch (err) {
+      const raw = typeof err === 'string' ? err : String(err ?? '');
+      if (conflictResolution === 'fail' && raw.includes('cleanup_restore_exists')) {
+        setConflictId(id);
+        return;
+      }
       message.error(mapBackendError(err));
     }
+  };
+
+  const restore = async (id: string) => {
+    await restoreWith(id, 'fail');
   };
 
   const emptyAll = async () => {
@@ -182,6 +194,33 @@ export const TrashPanel: React.FC = () => {
           />
         )}
       </div>
+
+      <Modal
+        open={!!conflictId}
+        title={t('trash.restoreConflictTitle')}
+        onCancel={() => setConflictId(null)}
+        footer={[
+          <Button key="cancel" onClick={() => setConflictId(null)}>
+            {t('trash.restoreCancel')}
+          </Button>,
+          <Button
+            key="overwrite"
+            danger
+            onClick={() => conflictId && void restoreWith(conflictId, 'overwrite')}
+          >
+            {t('trash.restoreOverwrite')}
+          </Button>,
+          <Button
+            key="rename"
+            type="primary"
+            onClick={() => conflictId && void restoreWith(conflictId, 'rename')}
+          >
+            {t('trash.restoreRename')}
+          </Button>,
+        ]}
+      >
+        {t('trash.restoreConflictBody')}
+      </Modal>
     </div>
   );
 };

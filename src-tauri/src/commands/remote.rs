@@ -474,6 +474,41 @@ fn cache_remote_list(path: &str, entries: &[RemoteDirEntry]) {
     }
 }
 
+/// Drop cached listings for a remote path and its ancestors / children.
+pub(crate) fn invalidate_remote_list_cache(path: &str) {
+    if let Ok(mut cache) = remote_list_cache().lock() {
+        if path.is_empty() {
+            cache.clear();
+            return;
+        }
+        let prefix = if path.ends_with('/') {
+            path.to_string()
+        } else {
+            format!("{path}/")
+        };
+        cache.retain(|k, _| k != path && !k.starts_with(&prefix));
+        // Also drop parent directory listing so refreshed browse sees new children.
+        if let Ok((_, rel)) = parse_remote_path(path) {
+            if let Some((parent_rel, _)) = rel.rsplit_once('/') {
+                let (conn_id, _) = match parse_remote_path(path) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                let parent = join_remote_path(&conn_id, parent_rel);
+                cache.remove(&parent);
+            } else if let Ok((conn_id, _)) = parse_remote_path(path) {
+                cache.remove(&join_remote_path(&conn_id, ""));
+            }
+        }
+    }
+}
+
+pub(crate) fn invalidate_remote_list_cache_many(paths: &[String]) {
+    for p in paths {
+        invalidate_remote_list_cache(p);
+    }
+}
+
 fn simple_entries_to_remote(
     conn_id: &str,
     parent_rel: &str,
@@ -896,12 +931,16 @@ async fn ensure_remote_dirs(session: &mut SmbSession, rel: &str) -> Result<(), S
 }
 
 /// Recursively download remote dir/file into local directory (places item under target_dir).
-pub async fn transfer_remote_to_local(
+pub async fn transfer_remote_to_local_job(
     store: &RemoteSessionStore,
     source_remote: &str,
     target_dir: &Path,
     conflict: &str,
+    job_id: u64,
 ) -> Result<(u64, u64, u64, Vec<String>), String> {
+    if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+        return Err(err::code("transfer_cancelled"));
+    }
     let (conn_id, rel) = parse_remote_path(source_remote)?;
     let mut transferred = 0u64;
     let mut skipped = 0u64;
@@ -950,6 +989,9 @@ pub async fn transfer_remote_to_local(
                 _ => return Err(err::code("invalid_conflict_resolution")),
             }
         }
+        if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+            return Err(err::code("transfer_cancelled"));
+        }
         match download_remote_file(store, source_remote, &dest).await {
             Ok(()) => transferred += 1,
             Err(e) => {
@@ -979,6 +1021,9 @@ pub async fn transfer_remote_to_local(
     walk_remote_files(store, &conn_id, &rel, &mut files, 50_000).await?;
 
     for (rpath, _size, is_directory) in files {
+        if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+            return Err(err::code("transfer_cancelled"));
+        }
         let (_cid, child_rel) = parse_remote_path(&rpath)?;
         let suffix = if rel.is_empty() {
             child_rel.clone()
@@ -1010,12 +1055,16 @@ pub async fn transfer_remote_to_local(
 }
 
 /// Recursively upload local path into remote directory.
-pub async fn transfer_local_to_remote(
+pub async fn transfer_local_to_remote_job(
     store: &RemoteSessionStore,
     source_local: &Path,
     target_remote_dir: &str,
     conflict: &str,
+    job_id: u64,
 ) -> Result<(u64, u64, u64, Vec<String>), String> {
+    if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+        return Err(err::code("transfer_cancelled"));
+    }
     let (conn_id, target_rel) = parse_remote_path(target_remote_dir)?;
     let mut transferred = 0u64;
     let mut skipped = 0u64;
@@ -1089,6 +1138,9 @@ pub async fn transfer_local_to_remote(
 
     let walker = walkdir::WalkDir::new(source_local).follow_links(false);
     for entry in walker.into_iter().flatten() {
+        if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+            return Err(err::code("transfer_cancelled"));
+        }
         let path = entry.path();
         let rel_local = match path.strip_prefix(source_local) {
             Ok(r) => r,
@@ -1215,6 +1267,11 @@ pub async fn transfer_files_remote(
     );
 
     let target_is_remote = path_util::is_remote_path(&target_path);
+    let invalidate_paths: Vec<String> = {
+        let mut paths = vec![target_path.clone()];
+        paths.extend(source_paths.iter().cloned());
+        paths
+    };
     let store_arc = store.inner().clone();
     let sem = Arc::new(tokio::sync::Semaphore::new(concurrency));
     let done = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1271,20 +1328,22 @@ pub async fn transfer_files_remote(
 
             let result = match (source_is_remote, target_is_remote) {
                 (true, false) => {
-                    transfer_remote_to_local(
+                    transfer_remote_to_local_job(
                         store_arc.as_ref(),
                         &source,
                         Path::new(&target_path),
                         &resolution,
+                        job_id,
                     )
                     .await
                 }
                 (false, true) => {
-                    transfer_local_to_remote(
+                    transfer_local_to_remote_job(
                         store_arc.as_ref(),
                         Path::new(&source),
                         &target_path,
                         &resolution,
+                        job_id,
                     )
                     .await
                 }
@@ -1339,6 +1398,9 @@ pub async fn transfer_files_remote(
             },
         );
     }
+
+    // Always invalidate after remote writes so browse doesn't show stale listings.
+    invalidate_remote_list_cache_many(&invalidate_paths);
 
     Ok(crate::commands::transfer::TransferResult {
         success: failed == 0 && !cancelled,

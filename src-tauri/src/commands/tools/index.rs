@@ -229,8 +229,24 @@ pub fn search_index_filename(
         }
     }
 
-    let total_scanned = rows.len();
+    // Drop ghost rows (deleted/moved) so filename search mirrors disk.
+    let mut stale_paths = Vec::new();
+    let mut live = Vec::new();
     for hit in rows {
+        if Path::new(&hit.path).is_file() {
+            live.push(hit);
+        } else {
+            stale_paths.push(hit.path);
+        }
+    }
+    if !stale_paths.is_empty() {
+        for path in &stale_paths {
+            let _ = conn.execute("DELETE FROM files WHERE path = ?1", params![path]);
+        }
+    }
+
+    let total_scanned = live.len();
+    for hit in live {
         let file_type = file_type_for_ext(&hit.ext);
         matched.push(crate::commands::search::SearchResult {
             file_path: hit.path.clone(),
@@ -280,6 +296,7 @@ fn file_type_for_ext(ext: &str) -> String {
 }
 
 /// Re-index only files whose on-disk mtime is newer than the stored row (or missing).
+/// Also removes index rows under `root` that no longer exist on disk.
 #[tauri::command]
 pub fn index_root_incremental(root: String) -> Result<u64, String> {
     path_util::validate_user_path(&root)?;
@@ -297,6 +314,7 @@ pub fn index_root_incremental(root: String) -> Result<u64, String> {
         .map_err(|e| crate::err::with_detail("index_write_failed", e))?;
 
     let mut count = 0u64;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
         let mut stmt = tx
             .prepare(
@@ -328,6 +346,7 @@ pub fn index_root_incremental(root: String) -> Result<u64, String> {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             let path_str = p.to_string_lossy().to_string();
+            seen.insert(path_str.clone());
             let stored: Option<i64> = existing_mtime
                 .query_row(params![path_str], |row| row.get(0))
                 .ok();
@@ -350,6 +369,31 @@ pub fn index_root_incremental(root: String) -> Result<u64, String> {
             count += 1;
         }
     }
+
+    // Prune deleted / moved paths for this root.
+    {
+        let mut stale = Vec::new();
+        {
+            let mut stmt = tx
+                .prepare("SELECT path FROM files WHERE root = ?1")
+                .map_err(|e| crate::err::with_detail("index_write_failed", e))?;
+            let rows = stmt
+                .query_map(params![root], |row| row.get::<_, String>(0))
+                .map_err(|e| crate::err::with_detail("index_write_failed", e))?;
+            for row in rows {
+                let path = row.map_err(|e| crate::err::with_detail("index_write_failed", e))?;
+                if !seen.contains(&path) {
+                    stale.push(path);
+                }
+            }
+        }
+        for path in stale {
+            tx.execute("DELETE FROM files WHERE path = ?1", params![path])
+                .map_err(|e| crate::err::with_detail("index_write_failed", e))?;
+            count += 1;
+        }
+    }
+
     tx.commit()
         .map_err(|e| crate::err::with_detail("index_write_failed", e))?;
     Ok(count)

@@ -65,6 +65,15 @@ export interface CheckConflictsResponse {
   conflicts: ConflictFile[];
 }
 
+export interface TransferJobSnapshot {
+  resolution: ConflictResolution;
+  sourceItems: TransferItem[];
+  targetPath: string;
+  sourceConnectionName: string | null;
+  targetConnectionName: string | null;
+  direction: TransferDirection;
+}
+
 interface TransferState {
   // 传输方向
   direction: TransferDirection;
@@ -99,7 +108,7 @@ interface TransferState {
   
   // 传输操作
   checkConflicts: () => Promise<ConflictCheckResult>;
-  startTransfer: (resolution: ConflictResolution) => Promise<void>;
+  startTransfer: (resolution: ConflictResolution, job?: TransferJobSnapshot) => Promise<void>;
   cancelTransfer: () => Promise<void>;
   
   // 冲突弹窗
@@ -127,26 +136,45 @@ const formatSize = (size: number): string => {
 // 生成唯一 ID
 const generateId = () => Math.random().toString(36).substring(2, 15);
 
-type QueuedTransfer = { resolution: ConflictResolution };
-
-const transferQueue: QueuedTransfer[] = [];
+const transferQueue: TransferJobSnapshot[] = [];
 
 const drainTransferQueue = () => {
   const next = transferQueue.shift();
-  if (next) {
-    void useTransferStore.getState().startTransfer(next.resolution);
-  }
+  if (!next) return;
+  void useTransferStore.getState().startTransfer(next.resolution, next);
 };
 
-const transferRetryPayload = (
+const snapshotFromState = (
   resolution: ConflictResolution,
-  sourcePaths: string[],
-  targetPath: string
-) => ({
+  state: Pick<
+    TransferState,
+    | 'sourceItems'
+    | 'targetPath'
+    | 'sourceConnectionName'
+    | 'targetConnectionName'
+    | 'direction'
+  >
+): TransferJobSnapshot | null => {
+  if (!state.targetPath || state.sourceItems.length === 0) return null;
+  return {
+    resolution,
+    sourceItems: state.sourceItems.map((item) => ({ ...item })),
+    targetPath: state.targetPath,
+    sourceConnectionName: state.sourceConnectionName,
+    targetConnectionName: state.targetConnectionName,
+    direction: state.direction,
+  };
+};
+
+export const transferRetryPayload = (job: TransferJobSnapshot) => ({
   action: 'transfer' as const,
-  resolution,
-  sourcePaths,
-  targetPath,
+  resolution: job.resolution,
+  sourcePaths: job.sourceItems.map((i) => i.sourcePath),
+  sourceItems: job.sourceItems,
+  targetPath: job.targetPath,
+  sourceConnectionName: job.sourceConnectionName,
+  targetConnectionName: job.targetConnectionName,
+  direction: job.direction,
 });
 
 export const useTransferStore = create<TransferState>((set, get) => ({
@@ -182,7 +210,7 @@ export const useTransferStore = create<TransferState>((set, get) => ({
       ...state.sourceItems,
       ...items.map(item => ({
         ...item,
-        id: generateId(),
+        id: item.id || generateId(),
         sizeFormatted: item.sizeFormatted || formatSize(item.size),
       })),
     ],
@@ -239,20 +267,33 @@ export const useTransferStore = create<TransferState>((set, get) => ({
     }
   },
   
-  startTransfer: async (resolution) => {
-    const { sourceItems, targetPath, transferring } = get();
+  startTransfer: async (resolution, job) => {
+    const state = get();
+    const snapshot =
+      job ??
+      snapshotFromState(resolution, state);
 
-    if (sourceItems.length === 0 || !targetPath) {
+    if (!snapshot) {
       set({ error: i18n.t('transfer.store.needSourceAndTarget') });
       return;
     }
 
-    if (transferring) {
-      transferQueue.push({ resolution });
+    if (state.transferring) {
+      transferQueue.push({ ...snapshot, resolution });
       return;
     }
 
-    const sourcePaths = sourceItems.map((item) => item.sourcePath);
+    // Restore UI to this job's payload (needed for queued / retry jobs).
+    set({
+      direction: snapshot.direction,
+      sourceItems: snapshot.sourceItems,
+      targetPath: snapshot.targetPath,
+      sourceConnectionName: snapshot.sourceConnectionName,
+      targetConnectionName: snapshot.targetConnectionName,
+    });
+
+    const sourcePaths = snapshot.sourceItems.map((item) => item.sourcePath);
+    const targetPath = snapshot.targetPath;
     
     let jobId = 0;
     try {
@@ -269,7 +310,7 @@ export const useTransferStore = create<TransferState>((set, get) => ({
       title: targetPath,
       status: 'running',
       backendJobId: jobId,
-      progress: { current: 0, total: sourceItems.length, percentage: 0 },
+      progress: { current: 0, total: snapshot.sourceItems.length, percentage: 0 },
       startedAt: Date.now(),
       cancellable: true,
     });
@@ -283,14 +324,14 @@ export const useTransferStore = create<TransferState>((set, get) => ({
       progress: {
         currentFile: '',
         currentIndex: 0,
-        totalFiles: sourceItems.length,
+        totalFiles: snapshot.sourceItems.length,
         bytesTransferred: 0,
-        totalBytes: sourceItems.reduce((sum, item) => sum + item.size, 0),
+        totalBytes: snapshot.sourceItems.reduce((sum, item) => sum + item.size, 0),
         percentage: 0,
       },
     });
     
-    const retryPayload = transferRetryPayload(resolution, sourcePaths, targetPath);
+    const retryPayload = transferRetryPayload({ ...snapshot, resolution });
 
     try {
       const maxConcurrency = Math.max(
@@ -325,7 +366,9 @@ export const useTransferStore = create<TransferState>((set, get) => ({
           retryPayload
         );
 
-      if (mapped.success) {
+      // Clear sources only for the job that just finished, and only if nothing is queued
+      // that depends on restoring its own snapshot next.
+      if (mapped.success && transferQueue.length === 0) {
         set({ sourceItems: [] });
       }
     } catch (err) {

@@ -155,6 +155,28 @@ fn unique_trash_name(base: &str) -> String {
     format!("{base}_{nonce}")
 }
 
+fn unique_local_restore_name(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("restored");
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    for i in 1..10_000 {
+        let candidate = parent.join(format!("{stem} ({i}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    parent.join(format!("{stem}_{}{ext}", unique_trash_name("r")))
+}
+
+/// Move paths into trash. On any failure, roll back already-moved items so we never
+/// leave orphan files without a manifest entry.
 fn move_to_trash_batch(paths: &[PathBuf]) -> Result<TrashBatch, String> {
     let batch_id = unique_trash_name("batch");
     let batch_dir = trash_root()?.join(&batch_id);
@@ -165,26 +187,39 @@ fn move_to_trash_batch(paths: &[PathBuf]) -> Result<TrashBatch, String> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut items = Vec::new();
+
     for src in paths {
         let name = src
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("item")
             .to_string();
-        let trashed_rel = format!("{batch_id}/{name}");
+        // Unique per item to avoid basename collisions within a batch.
+        let stored_name = unique_trash_name(&name);
+        let trashed_rel = format!("{batch_id}/{stored_name}");
         let dest = trash_root()?.join(&trashed_rel);
-        if dest.exists() {
-            return Err(crate::err::with_detail("cleanup_trash_collision", dest.display()));
+
+        match fs::rename(src, &dest) {
+            Ok(()) => {
+                moved.push((src.clone(), dest.clone()));
+                let size = entry_size(&dest);
+                items.push(TrashManifestItem {
+                    original_path: src.to_string_lossy().to_string(),
+                    trashed_rel,
+                    name: stored_name,
+                    size,
+                });
+            }
+            Err(e) => {
+                for (orig, dest_path) in moved.iter().rev() {
+                    let _ = fs::rename(dest_path, orig);
+                }
+                let _ = fs::remove_dir_all(&batch_dir);
+                return Err(crate::err::with_detail("cleanup_trash_failed", e));
+            }
         }
-        fs::rename(src, &dest).map_err(|e| crate::err::with_detail("cleanup_trash_failed", e))?;
-        let size = entry_size(&dest);
-        items.push(TrashManifestItem {
-            original_path: src.to_string_lossy().to_string(),
-            trashed_rel,
-            name,
-            size,
-        });
     }
 
     Ok(TrashBatch {
@@ -219,6 +254,14 @@ fn remove_path_permanent(path: &Path) -> Result<(), String> {
     }
 }
 
+fn remove_path_any(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        fs::remove_dir_all(path).map_err(|e| crate::err::with_detail("cleanup_restore_failed", e))
+    } else {
+        fs::remove_file(path).map_err(|e| crate::err::with_detail("cleanup_restore_failed", e))
+    }
+}
+
 #[tauri::command]
 pub fn delete_cleanup_items(paths: Vec<String>, to_trash: bool) -> Result<DeleteCleanupResult, String> {
     let validated = validate_cleanup_paths(&paths)?;
@@ -229,10 +272,27 @@ pub fn delete_cleanup_items(paths: Vec<String>, to_trash: bool) -> Result<Delete
     if to_trash {
         match move_to_trash_batch(&validated) {
             Ok(batch) => {
+                let count = batch.items.len();
+                let batch_id = batch.id.clone();
                 let mut manifest = load_manifest()?;
-                manifest.batches.push(batch);
-                save_manifest(&manifest)?;
-                deleted = validated.len();
+                manifest.batches.push(batch.clone());
+                match save_manifest(&manifest) {
+                    Ok(()) => deleted = count,
+                    Err(e) => {
+                        // Roll files back to original paths; drop empty batch dir.
+                        for item in batch.items.iter().rev() {
+                            let from = trash_root()
+                                .ok()
+                                .map(|r| r.join(&item.trashed_rel));
+                            if let Some(from) = from {
+                                let _ = fs::rename(&from, Path::new(&item.original_path));
+                            }
+                        }
+                        let _ = fs::remove_dir_all(trash_root()?.join(&batch_id));
+                        failed = count;
+                        errors.push(e);
+                    }
+                }
             }
             Err(e) => {
                 failed = validated.len();
@@ -269,6 +329,7 @@ pub fn undo_cleanup_delete() -> Result<UndoCleanupResult, String> {
     let mut restored = 0usize;
     let mut failed = 0usize;
     let mut errors = Vec::new();
+    let mut remaining_items = Vec::new();
 
     for item in batch.items.iter().rev() {
         let from = trash_root()?.join(&item.trashed_rel);
@@ -281,27 +342,38 @@ pub fn undo_cleanup_delete() -> Result<UndoCleanupResult, String> {
         if let Some(parent) = to.parent() {
             if let Err(e) = fs::create_dir_all(parent) {
                 failed += 1;
+                remaining_items.push(item.clone());
                 errors.push(crate::err::with_detail("cleanup_restore_failed", e));
                 continue;
             }
         }
-        if to.exists() {
-            failed += 1;
-            errors.push(crate::err::with_detail("cleanup_restore_exists", &item.original_path));
-            continue;
-        }
-        match fs::rename(&from, to) {
+        // Undo prefers rename-aside when original is occupied.
+        let dest = if to.exists() {
+            unique_local_restore_name(to)
+        } else {
+            to.to_path_buf()
+        };
+        match fs::rename(&from, &dest) {
             Ok(()) => restored += 1,
             Err(e) => {
                 failed += 1;
+                remaining_items.push(item.clone());
                 errors.push(crate::err::with_detail("cleanup_restore_failed", e));
             }
         }
     }
 
-  // Remove empty batch dir
-    let batch_dir = trash_root()?.join(&batch.id);
-    let _ = fs::remove_dir_all(&batch_dir);
+    if remaining_items.is_empty() {
+        let batch_dir = trash_root()?.join(&batch.id);
+        let _ = fs::remove_dir_all(&batch_dir);
+    } else {
+        // Keep failed items in manifest so they can be restored later from Trash panel.
+        manifest.batches.push(TrashBatch {
+            id: batch.id,
+            deleted_at: batch.deleted_at,
+            items: remaining_items,
+        });
+    }
 
     save_manifest(&manifest)?;
 
@@ -336,7 +408,12 @@ pub fn list_trash() -> Result<Vec<TrashItem>, String> {
 }
 
 #[tauri::command]
-pub fn restore_trash_item(id: String) -> Result<(), String> {
+pub fn restore_trash_item(id: String, conflict_resolution: Option<String>) -> Result<String, String> {
+    let resolution = match conflict_resolution.as_deref().unwrap_or("rename") {
+        "overwrite" | "rename" | "fail" => conflict_resolution.as_deref().unwrap_or("rename"),
+        other => return Err(crate::err::with_detail("invalid_conflict_resolution", other)),
+    };
+
     let (batch_id, name) = id
         .split_once('/')
         .ok_or_else(|| crate::err::with_detail("trash_id_invalid", &id))?;
@@ -353,22 +430,44 @@ pub fn restore_trash_item(id: String) -> Result<(), String> {
         .position(|i| i.name == name)
         .ok_or_else(|| crate::err::with_detail("trash_item_missing", &id))?;
 
-    let item = manifest.batches[batch_idx].items.remove(item_idx);
-    if manifest.batches[batch_idx].items.is_empty() {
-        let removed = manifest.batches.remove(batch_idx);
-        let _ = fs::remove_dir_all(trash_root()?.join(&removed.id));
+    let item = manifest.batches[batch_idx].items[item_idx].clone();
+    let from = trash_root()?.join(&item.trashed_rel);
+    if !from.exists() {
+        return Err(crate::err::with_detail("cleanup_restore_missing", &item.trashed_rel));
     }
 
-    let from = trash_root()?.join(&item.trashed_rel);
     let to = Path::new(&item.original_path);
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent).map_err(|e| crate::err::with_detail("cleanup_restore_failed", e))?;
     }
-    if to.exists() {
-        return Err(crate::err::with_detail("cleanup_restore_exists", &item.original_path));
+
+    let dest = if to.exists() {
+        match resolution {
+            "fail" => {
+                return Err(crate::err::with_detail(
+                    "cleanup_restore_exists",
+                    &item.original_path,
+                ))
+            }
+            "overwrite" => {
+                remove_path_any(to)?;
+                to.to_path_buf()
+            }
+            _ => unique_local_restore_name(to),
+        }
+    } else {
+        to.to_path_buf()
+    };
+
+    fs::rename(&from, &dest).map_err(|e| crate::err::with_detail("cleanup_restore_failed", e))?;
+
+    manifest.batches[batch_idx].items.remove(item_idx);
+    if manifest.batches[batch_idx].items.is_empty() {
+        let removed = manifest.batches.remove(batch_idx);
+        let _ = fs::remove_dir_all(trash_root()?.join(&removed.id));
     }
-    fs::rename(&from, to).map_err(|e| crate::err::with_detail("cleanup_restore_failed", e))?;
-    save_manifest(&manifest)
+    save_manifest(&manifest)?;
+    Ok(dest.to_string_lossy().to_string())
 }
 
 #[tauri::command]

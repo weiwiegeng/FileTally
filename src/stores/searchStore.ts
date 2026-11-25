@@ -156,7 +156,8 @@ const readCache = (key: string): SearchResponse | null => {
     const map = JSON.parse(raw) as Record<string, { ts: number; data: SearchResponse }>;
     const hit = map[key];
     if (!hit) return null;
-    if (Date.now() - hit.ts > 10 * 60 * 1000) return null;
+    // Keep cache short so deletes/renames don't linger as false hits.
+    if (Date.now() - hit.ts > 60 * 1000) return null;
     return hit.data;
   } catch {
     return null;

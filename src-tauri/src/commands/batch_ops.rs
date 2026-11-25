@@ -42,12 +42,53 @@ fn validate_op(op: &str) -> Result<(), String> {
     }
 }
 
+fn validate_conflict(resolution: &str) -> Result<&str, String> {
+    match resolution {
+        "skip" | "overwrite" | "rename" => Ok(resolution),
+        other => Err(crate::err::with_detail("invalid_conflict_resolution", other)),
+    }
+}
+
 fn dest_for(source: &Path, dest_dir: &Path) -> PathBuf {
     let name = source
         .file_name()
         .map(|n| n.to_owned())
         .unwrap_or_else(|| std::ffi::OsString::from("unknown"));
     dest_dir.join(name)
+}
+
+fn unique_dest_name(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file");
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    for i in 1..10_000 {
+        let candidate = parent.join(format!("{stem} ({i}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    parent.join(format!(
+        "{stem}_{}{ext}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ))
+}
+
+fn remove_existing(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        fs::remove_dir_all(path).map_err(|e| crate::err::with_detail("batch_overwrite_failed", e))
+    } else {
+        fs::remove_file(path).map_err(|e| crate::err::with_detail("batch_overwrite_failed", e))
+    }
 }
 
 #[tauri::command]
@@ -96,10 +137,12 @@ pub fn apply_batch_ops(
     items: Vec<BatchOpItem>,
     dest: String,
     archive_zip: Option<bool>,
+    conflict_resolution: Option<String>,
 ) -> Result<BatchOpApplyResult, String> {
     if archive_zip.unwrap_or(false) {
         return Err(crate::err::code("batch_zip_unsupported"));
     }
+    let resolution = validate_conflict(conflict_resolution.as_deref().unwrap_or("skip"))?;
 
     let preview = preview_batch_ops(items, dest)?;
     let mut applied = 0usize;
@@ -109,11 +152,28 @@ pub fn apply_batch_ops(
 
     for entry in preview.entries {
         let src = Path::new(&entry.source_path);
-        let dst = Path::new(&entry.dest_path);
-        if entry.exists_at_dest {
-            skipped += 1;
-            continue;
+        let mut dst = PathBuf::from(&entry.dest_path);
+
+        if entry.exists_at_dest || dst.exists() {
+            match resolution {
+                "skip" => {
+                    skipped += 1;
+                    continue;
+                }
+                "rename" => {
+                    dst = unique_dest_name(&dst);
+                }
+                "overwrite" => {
+                    if let Err(e) = remove_existing(&dst) {
+                        failed += 1;
+                        errors.push(e);
+                        continue;
+                    }
+                }
+                _ => unreachable!(),
+            }
         }
+
         if let Some(parent) = dst.parent() {
             if let Err(e) = fs::create_dir_all(parent) {
                 failed += 1;
@@ -124,12 +184,12 @@ pub fn apply_batch_ops(
         let result = match entry.op.as_str() {
             "copy" => {
                 if src.is_dir() {
-                    copy_dir_all(src, dst)
+                    copy_dir_all(src, &dst)
                 } else {
-                    fs::copy(src, dst).map(|_| ())
+                    fs::copy(src, &dst).map(|_| ())
                 }
             }
-            "move" => fs::rename(src, dst),
+            "move" => fs::rename(src, &dst),
             _ => {
                 failed += 1;
                 errors.push(crate::err::with_detail("batch_invalid_op", &entry.op));
@@ -142,7 +202,7 @@ pub fn apply_batch_ops(
                 failed += 1;
                 errors.push(crate::err::with_detail(
                     "batch_apply_failed",
-                    format!("{} -> {}: {}", entry.source_path, entry.dest_path, e),
+                    format!("{} -> {}: {}", entry.source_path, dst.display(), e),
                 ));
             }
         }

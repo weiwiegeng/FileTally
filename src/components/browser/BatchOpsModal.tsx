@@ -58,6 +58,9 @@ export const BatchOpsModal: React.FC<BatchOpsModalProps> = ({
   const [pathsText, setPathsText] = useState(initialPaths.join('\n'));
   const [dest, setDest] = useState('');
   const [op, setOp] = useState<'copy' | 'move'>('copy');
+  const [conflictResolution, setConflictResolution] = useState<'skip' | 'rename' | 'overwrite'>(
+    'rename'
+  );
   const [preview, setPreview] = useState<BatchOpPreview | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -114,6 +117,7 @@ export const BatchOpsModal: React.FC<BatchOpsModalProps> = ({
         items: buildItems(),
         dest,
         archiveZip: false,
+        conflictResolution,
       });
       message.success(
         t('batch.applyResult', {
@@ -181,6 +185,20 @@ export const BatchOpsModal: React.FC<BatchOpsModalProps> = ({
             <Input value={dest} onChange={(e) => setDest(e.target.value)} />
             <Button icon={<FolderOpenOutlined />} onClick={() => void pickDest()} />
           </Space.Compact>
+        </Form.Item>
+        <Form.Item
+          label={t('batch.conflictStrategy')}
+          extra={t('batch.conflictHint')}
+        >
+          <Select
+            value={conflictResolution}
+            onChange={setConflictResolution}
+            options={[
+              { value: 'rename', label: t('batch.conflictRename') },
+              { value: 'overwrite', label: t('batch.conflictOverwrite') },
+              { value: 'skip', label: t('batch.conflictSkip') },
+            ]}
+          />
         </Form.Item>
       </Form>
 

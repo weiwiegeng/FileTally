@@ -339,9 +339,11 @@ export const CleanupSuggestionTab: React.FC = () => {
             >
               {t('analysis.cleanup.deletePermanent')}
             </Button>
-            <Button onClick={() => void handleUndo()} loading={deleteLoading}>
-              {t('analysis.cleanup.undoLast')}
-            </Button>
+            <Tooltip title={t('analysis.cleanup.undoLastHint')}>
+              <Button onClick={() => void handleUndo()} loading={deleteLoading}>
+                {t('analysis.cleanup.undoLast')}
+              </Button>
+            </Tooltip>
             {selectedPaths.size > 0 && (
               <Tag color="blue">
                 {t('analysis.cleanup.selectedCount', { count: selectedPaths.size })}
