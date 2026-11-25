@@ -4,6 +4,11 @@
 # 用法：
 #   git tag v1.0.0 && git push origin v1.0.0
 #   或在 Actions → Release → Run workflow
+#
+# 产物（每平台一种主安装包，避免 targets=all 刷出一堆格式）：
+#   macOS Apple Silicon → .dmg
+#   Windows             → NSIS .exe
+#   Linux               → .AppImage
 name: Release
 
 on:
@@ -26,19 +31,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-latest is Apple Silicon — build native arm64 without an extra --target.
+          # macos-latest = Apple Silicon。Intel Mac 交叉编译在 CI 上不稳定，暂不打。
           - platform: macos-latest
-            args: ''
-            rust_targets: ''
-          - platform: macos-latest
-            args: --target x86_64-apple-darwin
-            rust_targets: x86_64-apple-darwin
-          - platform: ubuntu-22.04
-            args: ''
-            rust_targets: ''
+            args: --bundles dmg
           - platform: windows-latest
-            args: ''
-            rust_targets: ''
+            args: --bundles nsis
+          - platform: ubuntu-22.04
+            args: --bundles appimage
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -52,8 +51,6 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.rust_targets }}
 
       - name: Install dependencies (Ubuntu)
         if: matrix.platform == 'ubuntu-22.04'
@@ -86,15 +83,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           # Do not put a trailing "--" here — tauri-action already inserts one before args.
-          # Wrong: npm run tauri -- build -- --target …  (macOS failed on this)
           tauriScript: npm run tauri
           tagName: ${{ steps.version.outputs.tag }}
           releaseName: FileTally v${{ steps.version.outputs.version }}
           releaseBody: |
             FileTally **v${{ steps.version.outputs.version }}**
 
-            Download the installer for your platform from the assets below.
-          # Tag pushes always draft; manual run follows the "draft" checkbox.
+            | 系统 | 下载 |
+            |------|------|
+            | Windows | `FileTally_*_x64-setup.exe` |
+            | macOS (Apple Silicon) | `FileTally_*_aarch64.dmg` |
+            | Linux | `FileTally_*_amd64.AppImage` |
+
+            Source code archives are auto-attached by GitHub.
           releaseDraft: ${{ github.event_name != 'workflow_dispatch' || inputs.draft }}
           prerelease: false
           args: ${{ matrix.args }}

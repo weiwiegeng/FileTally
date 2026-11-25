@@ -65,7 +65,13 @@ npm run tauri:build
 ./build.sh windows   # 或 macos / all → release/
 ```
 
-**GitHub 多平台安装包：** 日常 push / PR 只跑 [CI](.github/workflows/ci.yml)（类型检查与测试）。打标签后 [Release](.github/workflows/release.yml) 会在 Windows / macOS (Intel + Apple Silicon) / Linux 上构建，并挂到 **Draft Release**：
+**GitHub 多平台安装包：** 日常 push / PR 只跑 [CI](.github/workflows/ci.yml)。打标签后 [Release](.github/workflows/release.yml) 构建并挂到 **Draft Release**：
+
+| 系统 | 文件 |
+|------|------|
+| Windows | `*_x64-setup.exe` |
+| macOS（Apple Silicon） | `*_aarch64.dmg` |
+| Linux | `*_amd64.AppImage` |
 
 ```bash
 git tag v1.0.0
