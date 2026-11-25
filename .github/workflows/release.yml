@@ -84,6 +84,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          # Force npm — do not auto-pick stale pnpm-lock.yaml.
+          tauriScript: npm run tauri --
           tagName: ${{ steps.version.outputs.tag }}
           releaseName: FileTally v${{ steps.version.outputs.version }}
           releaseBody: |
