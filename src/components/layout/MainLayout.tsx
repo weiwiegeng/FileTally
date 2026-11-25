@@ -165,6 +165,27 @@ export const MainLayout: React.FC = () => {
   const [activeMenu, setActiveMenu] = useState<MenuKey>(() =>
     resolveDefaultPage(settings.defaultPage)
   );
+  const [mountedMenus, setMountedMenus] = useState<Set<MenuKey>>(
+    () => new Set([resolveDefaultPage(settings.defaultPage)])
+  );
+
+  useEffect(() => {
+    setMountedMenus((prev) => {
+      if (prev.has(activeMenu)) return prev;
+      const KEEP_ALWAYS: MenuKey[] = ['browser', 'filter', 'transfer', 'sync'];
+      const MAX_MOUNTED = 8;
+      const next = new Set(prev);
+      next.add(activeMenu);
+      if (next.size <= MAX_MOUNTED) return next;
+      // Drop oldest non-pinned, non-active pages (insertion order via Array.from).
+      for (const key of Array.from(next)) {
+        if (next.size <= MAX_MOUNTED) break;
+        if (key === activeMenu || KEEP_ALWAYS.includes(key)) continue;
+        next.delete(key);
+      }
+      return next;
+    });
+  }, [activeMenu]);
 
   useEffect(() => {
     if (!requestedMenu) return;
@@ -273,8 +294,8 @@ export const MainLayout: React.FC = () => {
     },
   ];
 
-  const renderContent = () => {
-    switch (activeMenu) {
+  const pageFor = (key: MenuKey): React.ReactNode => {
+    switch (key) {
       case 'disk':
         return <DiskOverview />;
       case 'browser':
@@ -305,6 +326,23 @@ export const MainLayout: React.FC = () => {
         return null;
     }
   };
+
+  const renderContent = () => (
+    <div style={{ height: '100%', position: 'relative' }}>
+      {[...mountedMenus].map((key) => (
+        <div
+          key={key}
+          style={{
+            display: key === activeMenu ? 'block' : 'none',
+            height: '100%',
+          }}
+          aria-hidden={key !== activeMenu}
+        >
+          {pageFor(key)}
+        </div>
+      ))}
+    </div>
+  );
 
   const bgColors = useMemo(() => {
     if (!isDark) {
@@ -518,7 +556,7 @@ export const MainLayout: React.FC = () => {
           styles={{ body: { padding: 0, height: '100%' } }}
         >
           <div style={{ height: '100%', overflow: 'auto' }}>
-            <TaskCenter />
+            <TaskCenter embedded />
           </div>
         </Drawer>
       </Layout>

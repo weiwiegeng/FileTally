@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Button,
   Typography,
@@ -31,7 +31,7 @@ import {
   useDualPaneStore,
   useTransferStore,
 } from '../../stores';
-import { looksLikeSystemPath } from '../../utils/pathNav';
+import { looksLikeSystemPath, parentPath } from '../../utils/pathNav';
 import { BrowserPane } from './BrowserPane';
 import { BrowserPlacesBar } from './BrowserPlacesBar';
 import { FilePreview } from './FilePreview';
@@ -76,13 +76,57 @@ export const DualPaneFileBrowser: React.FC = () => {
     setLeftRoot,
     setRightRoot,
   } = useDualPaneStore();
-  const { addPath } = useFileStore();
+  const { addPath, invalidatePaths } = useFileStore();
   const { startTransfer } = useTransferStore();
   const [splitRatio] = useState(50);
+
+  const leftCwd = useDualPaneStore((s) => s.leftCwd);
+  const rightCwd = useDualPaneStore((s) => s.rightCwd);
+  const transferring = useTransferStore((s) => s.transferring);
+  const wasTransferring = useRef(false);
 
   const activeSelection = activePane === 'left' ? leftSelection : rightSelection;
   const activeRoot = activePane === 'left' ? leftRoot : rightRoot;
   const otherRoot = activePane === 'left' ? rightRoot : leftRoot;
+  const otherTarget =
+    (activePane === 'left' ? rightCwd : leftCwd) || otherRoot;
+
+  const targetForPane = useCallback(
+    (pane: 'left' | 'right') =>
+      (pane === 'left' ? leftCwd : rightCwd) || (pane === 'left' ? leftRoot : rightRoot),
+    [leftCwd, leftRoot, rightCwd, rightRoot]
+  );
+
+  const refreshAfterMutation = useCallback(
+    (extra: string[] = []) => {
+      const dual = useDualPaneStore.getState();
+      const paths = [
+        dual.leftRoot,
+        dual.rightRoot,
+        dual.leftCwd,
+        dual.rightCwd,
+        ...extra,
+      ].filter((p): p is string => Boolean(p));
+      void invalidatePaths(paths);
+    },
+    [invalidatePaths]
+  );
+
+  // Conflict modal / queued jobs finish outside runPaneTransfer — refresh when a transfer settles.
+  useEffect(() => {
+    if (wasTransferring.current && !transferring) {
+      const { targetPath, sourceItems, result } = useTransferStore.getState();
+      if (result && !result.cancelled) {
+        refreshAfterMutation([
+          ...(targetPath ? [targetPath] : []),
+          ...sourceItems
+            .map((item) => parentPath(item.sourcePath))
+            .filter((p): p is string => Boolean(p)),
+        ]);
+      }
+    }
+    wasTransferring.current = transferring;
+  }, [transferring, refreshAfterMutation]);
 
   const handleSortFieldChange = (value: string) => {
     const field = normalizeSortField(value);
@@ -125,6 +169,10 @@ export const DualPaneFileBrowser: React.FC = () => {
             })
           );
           setSelection(activePane, []);
+          refreshAfterMutation([
+            targetPath,
+            ...sourcePaths.map((p) => parentPath(p)).filter((p): p is string => Boolean(p)),
+          ]);
           return;
         } catch (err) {
           message.error(mapBackendError(err));
@@ -136,36 +184,37 @@ export const DualPaneFileBrowser: React.FC = () => {
       }
       const check = await runCopyToTarget(sourcePaths, targetPath);
       if (check === 'none') {
+        // Refresh happens when transferring settles (covers conflict modal too).
         await startTransfer('rename');
       }
     },
-    [activePane, setSelection, startTransfer, t]
+    [activePane, refreshAfterMutation, setSelection, startTransfer, t]
   );
 
   const handleCopyToOther = () => {
-    if (!otherRoot) {
+    if (!otherTarget) {
       message.warning(t('browser.dualPane.otherPaneEmpty'));
       return;
     }
-    void runPaneTransfer(activeSelection, otherRoot, false);
+    void runPaneTransfer(activeSelection, otherTarget, false);
   };
 
   const handleMoveToOther = () => {
-    if (!otherRoot) {
+    if (!otherTarget) {
       message.warning(t('browser.dualPane.otherPaneEmpty'));
       return;
     }
-    void runPaneTransfer(activeSelection, otherRoot, true);
+    void runPaneTransfer(activeSelection, otherTarget, true);
   };
 
   const handleDropOnPane = (targetPane: 'left' | 'right', paths: string[]) => {
-    const targetRoot = targetPane === 'left' ? leftRoot : rightRoot;
-    if (!targetRoot) {
+    const dest = targetForPane(targetPane);
+    if (!dest) {
       message.warning(t('browser.dualPane.otherPaneEmpty'));
       return;
     }
     setActivePane(targetPane);
-    void runPaneTransfer(paths, targetRoot, false);
+    void runPaneTransfer(paths, dest, false);
   };
 
   const handleEnterSelectedFolder = () => {
@@ -224,12 +273,20 @@ export const DualPaneFileBrowser: React.FC = () => {
             }
           }
           setSelection(activePane, []);
+          refreshAfterMutation(
+            activeSelection
+              .map((p) => parentPath(p))
+              .filter((p): p is string => Boolean(p))
+          );
         } catch (err) {
           message.error(mapBackendError(err));
         }
       },
     });
   };
+
+  const deleteIsRemote =
+    activeSelection.length > 0 && activeSelection.every(isAppRemotePath);
 
   useEffect(() => {
     if (settings.showHiddenFiles !== showHidden) {
@@ -271,7 +328,7 @@ export const DualPaneFileBrowser: React.FC = () => {
           <Button
             size="small"
             icon={<CopyOutlined />}
-            disabled={!activeSelection.length || !otherRoot}
+            disabled={!activeSelection.length || !otherTarget}
             onClick={handleCopyToOther}
           >
             {t('browser.dualPane.copyToOther')}
@@ -279,7 +336,7 @@ export const DualPaneFileBrowser: React.FC = () => {
           <Button
             size="small"
             icon={<SwapOutlined />}
-            disabled={!activeSelection.length || !otherRoot}
+            disabled={!activeSelection.length || !otherTarget}
             onClick={handleMoveToOther}
           >
             {t('browser.dualPane.moveToOther')}
@@ -291,7 +348,9 @@ export const DualPaneFileBrowser: React.FC = () => {
             disabled={!activeSelection.length}
             onClick={handleDelete}
           >
-            {t('browser.dualPane.deleteToTrash')}
+            {deleteIsRemote
+              ? t('browser.dualPane.deleteRemoteAction')
+              : t('browser.dualPane.deleteToTrash')}
           </Button>
           <Button size="small" icon={<SwapOutlined />} onClick={swapPanes}>
             {t('browser.dualPane.swapPanes')}

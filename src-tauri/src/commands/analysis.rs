@@ -226,7 +226,7 @@ async fn analyze_remote_folder(
     let mut type_map: HashMap<String, (u64, u64)> = HashMap::new();
     let mut large_files = Vec::new();
 
-    for (rpath, size, is_dir) in files {
+    for (rpath, size, is_dir, _mtime) in files {
         if is_dir {
             total_dirs += 1;
             continue;

@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::UNIX_EPOCH;
-use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
+use tokio::sync::Mutex;
 use walkdir::WalkDir;
 
 use crate::commands::remote::{
@@ -40,6 +41,11 @@ pub struct SyncProgress {
     pub current: u64,
     pub total: u64,
     pub message: String,
+}
+
+fn sync_gate() -> &'static Mutex<()> {
+    static GATE: OnceLock<Mutex<()>> = OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(()))
 }
 
 fn emit_sync_progress(app: &AppHandle, job_id: u64, stage: &str, current: u64, total: u64, message: &str) {
@@ -101,11 +107,11 @@ async fn list_remote_file_map(
     remote_root: &str,
 ) -> Result<HashMap<String, SyncFileEntry>, String> {
     let (conn_id, rel) = parse_remote_path(remote_root)?;
-    let mut files: Vec<(String, u64, bool)> = Vec::new();
+    let mut files: Vec<(String, u64, bool, i64)> = Vec::new();
     walk_remote_files(store, &conn_id, &rel, &mut files, 500_000).await?;
 
     let mut map = HashMap::new();
-    for (remote_path, size, is_dir) in files {
+    for (remote_path, size, is_dir, modified) in files {
         if is_dir {
             continue;
         }
@@ -123,7 +129,7 @@ async fn list_remote_file_map(
             SyncFileEntry {
                 relative_path: entry_rel,
                 size,
-                modified: 0,
+                modified,
             },
         );
     }
@@ -383,7 +389,20 @@ pub async fn run_sync(
     mode: Option<String>,
     conflict_resolution: Option<String>,
 ) -> Result<SyncCompareResult, String> {
+    let _gate = match sync_gate().try_lock() {
+        Ok(g) => g,
+        Err(_) => return Err(crate::err::code("sync_already_running")),
+    };
+
     let job_id = job_runner::resolve_or_begin(job_id, JobKind::Sync);
+    struct EndOnDrop(u64);
+    impl Drop for EndOnDrop {
+        fn drop(&mut self) {
+            job_runner::end_job(self.0);
+        }
+    }
+    let _end_guard = EndOnDrop(job_id);
+
     let delete_extras = delete_extras.unwrap_or(false);
     let mode = mode.as_deref().unwrap_or("one_way");
     let conflict_resolution = conflict_resolution.as_deref().unwrap_or("skip");
@@ -430,9 +449,10 @@ pub async fn run_sync(
         } else {
             0
         };
-    emit_sync_progress(&app, job_id, "syncing", 0, total, "starting");
+    emit_sync_progress(&app, job_id, "syncing", 0, total, "");
 
     let mut current = 0u64;
+    let mut errors: Vec<String> = Vec::new();
     for (rel, direction) in &work {
         if job_runner::is_cancelled(job_id) {
             job_runner::clear_cancel(job_id);
@@ -444,7 +464,10 @@ pub async fn run_sync(
             copy_rel_path(store.as_ref(), &source, &dest, rel, job_id).await
         };
         if let Err(e) = copy_res {
-            return Err(e);
+            errors.push(format!("{rel}: {e}"));
+            current += 1;
+            emit_sync_progress(&app, job_id, "syncing", current, total, rel);
+            continue;
         }
         current += 1;
         emit_sync_progress(&app, job_id, "syncing", current, total, rel);
@@ -473,7 +496,10 @@ pub async fn run_sync(
         }
     }
 
-    job_runner::end_job(job_id);
     emit_sync_progress(&app, job_id, "done", total, total, "");
+    if !errors.is_empty() {
+        let detail = errors.join("; ");
+        return Err(crate::err::with_detail("sync_copy_failed", detail));
+    }
     Ok(diff)
 }

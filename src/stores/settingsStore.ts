@@ -81,6 +81,8 @@ export interface AppSettings {
 
 interface SettingsState {
   settings: AppSettings;
+  /** One-shot: remapped legacy defaultPage disk → browser. */
+  migratedDefaultPageToBrowser: boolean;
   updateSettings: (updates: Partial<AppSettings>) => void;
   resetSettings: () => void;
 }
@@ -151,6 +153,7 @@ export const useSettingsStore = create<SettingsState>()(
   persist(
     (set) => ({
       settings: defaultSettings,
+      migratedDefaultPageToBrowser: false,
       
       updateSettings: (updates) => {
         set((state) => ({
@@ -159,23 +162,34 @@ export const useSettingsStore = create<SettingsState>()(
       },
       
       resetSettings: () => {
-        set({ settings: defaultSettings });
+        set({ settings: defaultSettings, migratedDefaultPageToBrowser: true });
       },
     }),
     {
       name: 'filetally-settings',
       // 处理旧版本数据迁移，确保新字段有默认值
-      merge: (persistedState: any, currentState) => {
-        const persisted = persistedState as SettingsState;
-        const raw = persisted?.settings || {};
+      merge: (persistedState: unknown, currentState) => {
+        const persisted = persistedState as Partial<SettingsState> | undefined;
+        const raw = (persisted?.settings || {}) as Partial<AppSettings>;
+        const alreadyMigrated = Boolean(persisted?.migratedDefaultPageToBrowser);
+
+        let defaultPage = normalizeDefaultPage(raw.defaultPage);
+        let migratedDefaultPageToBrowser = alreadyMigrated;
+        if (!alreadyMigrated) {
+          if (raw.defaultPage === 'disk') {
+            defaultPage = 'browser';
+          }
+          migratedDefaultPageToBrowser = true;
+        }
+
         return {
           ...currentState,
+          migratedDefaultPageToBrowser,
           settings: {
             ...defaultSettings,
             ...raw,
-            defaultPage: normalizeDefaultPage(raw.defaultPage),
+            defaultPage,
             sortBy: normalizeSortField(raw.sortBy || defaultSettings.sortBy),
-            // 确保 aiConfig 存在且完整
             aiConfig: {
               ...defaultSettings.aiConfig,
               ...raw.aiConfig,

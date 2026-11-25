@@ -60,6 +60,7 @@ pub struct WebDavEntry {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
+    pub modified: i64,
 }
 
 fn decode_href(raw: &str) -> String {
@@ -92,7 +93,7 @@ pub async fn webdav_list_dir(session: &WebDavSession, rel: &str, username: &str,
     };
     let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:">
-  <d:prop><d:resourcetype/><d:getcontentlength/></d:prop>
+  <d:prop><d:resourcetype/><d:getcontentlength/><d:getlastmodified/></d:prop>
 </d:propfind>"#;
 
     let resp = session
@@ -146,14 +147,28 @@ pub async fn webdav_list_dir(session: &WebDavSession, rel: &str, username: &str,
             .and_then(|s| s.split("</d:getcontentlength>").next())
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(0);
+        let modified = block
+            .split("<d:getlastmodified>")
+            .nth(1)
+            .and_then(|s| s.split("</d:getlastmodified>").next())
+            .map(|s| parse_http_date_secs(s.trim()))
+            .unwrap_or(0);
         out.push(WebDavEntry {
             href: decode_href(href),
             name,
             is_dir,
             size,
+            modified,
         });
     }
     Ok(out)
+}
+
+fn parse_http_date_secs(raw: &str) -> i64 {
+    // Best-effort RFC 2822 / HTTP-date → unix seconds (0 = unknown → size-only sync).
+    chrono::DateTime::parse_from_rfc2822(raw)
+        .map(|dt| dt.timestamp())
+        .unwrap_or(0)
 }
 
 pub async fn webdav_read_file(
@@ -240,7 +255,7 @@ pub async fn walk_webdav_files(
     rel: &str,
     username: &str,
     password: &str,
-    out: &mut Vec<(String, u64, bool)>,
+    out: &mut Vec<(String, u64, bool, i64)>,
     cap: usize,
 ) -> Result<(), String> {
     if out.len() >= cap {
@@ -258,13 +273,13 @@ pub async fn walk_webdav_files(
         };
         let remote_path = join_remote_path(conn_id, &child_rel);
         if e.is_dir {
-            out.push((remote_path, e.size, true));
+            out.push((remote_path, e.size, true, e.modified));
             Box::pin(walk_webdav_files(
                 session, conn_id, &child_rel, username, password, out, cap,
             ))
             .await?;
         } else {
-            out.push((remote_path, e.size, false));
+            out.push((remote_path, e.size, false, e.modified));
         }
     }
     Ok(())

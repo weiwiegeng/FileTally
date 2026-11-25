@@ -44,7 +44,12 @@ const statusColor = (s: TaskStatus): string => {
   }
 };
 
-export const TaskCenter: React.FC = () => {
+interface TaskCenterProps {
+  /** Hide the page chrome when embedded in the tasks drawer. */
+  embedded?: boolean;
+}
+
+export const TaskCenter: React.FC<TaskCenterProps> = ({ embedded = false }) => {
   const { t } = useTranslation();
   const colors = useThemeColors();
   const { tasks, cancelTask, clearFinished, removeTask } = useTaskStore();
@@ -245,7 +250,7 @@ export const TaskCenter: React.FC = () => {
     >
       <div
         style={{
-          padding: '16px 24px',
+          padding: embedded ? '12px 16px' : '16px 24px',
           borderBottom: `1px solid ${colors.border}`,
           display: 'flex',
           alignItems: 'center',
@@ -253,17 +258,23 @@ export const TaskCenter: React.FC = () => {
           flexShrink: 0,
         }}
       >
-        <Space>
-          <UnorderedListOutlined style={{ fontSize: 24, color: colors.accentPurple }} />
-          <div>
-            <Title level={4} style={{ margin: 0, color: colors.textPrimary }}>
-              {t('tasks.title')}
-            </Title>
-            <Text type="secondary" style={{ fontSize: 13 }}>
-              {t('tasks.activeCount', { count: activeCount })}
-            </Text>
-          </div>
-        </Space>
+        {embedded ? (
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            {t('tasks.activeCount', { count: activeCount })}
+          </Text>
+        ) : (
+          <Space>
+            <UnorderedListOutlined style={{ fontSize: 24, color: colors.accentPurple }} />
+            <div>
+              <Title level={4} style={{ margin: 0, color: colors.textPrimary }}>
+                {t('tasks.title')}
+              </Title>
+              <Text type="secondary" style={{ fontSize: 13 }}>
+                {t('tasks.activeCount', { count: activeCount })}
+              </Text>
+            </div>
+          </Space>
+        )}
         <Button icon={<ClearOutlined />} onClick={clearFinished}>
           {t('tasks.clearFinished')}
         </Button>

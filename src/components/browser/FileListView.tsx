@@ -45,15 +45,20 @@ export const FileListView: React.FC<FileListViewProps> = ({ rootPath, listPath: 
 
   useEffect(() => {
     if (!useShallowList || !effectiveListPath) return;
-    const cached = nodesMap[effectiveListPath];
-    if (cached?.length) {
-      setRows(cached);
+    // Empty dirs are valid cache hits — key presence matters, not length.
+    if (Object.prototype.hasOwnProperty.call(nodesMap, effectiveListPath)) {
+      setRows(nodesMap[effectiveListPath] || []);
       return;
     }
     setLoading(true);
     void fileService
       .scanDirectory(effectiveListPath)
-      .then((nodes) => setRows(nodes))
+      .then((nodes) => {
+        setRows(nodes);
+        useFileStore.setState((state) => ({
+          nodesMap: { ...state.nodesMap, [effectiveListPath]: nodes },
+        }));
+      })
       .catch(() => setRows([]))
       .finally(() => setLoading(false));
   }, [useShallowList, effectiveListPath, nodesMap]);

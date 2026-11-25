@@ -1,7 +1,13 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { normalizeRemotePath } from '../utils/pathNav';
 
 export type BrowserPaneSide = 'left' | 'right';
+
+const normalizeRoot = (path: string | null): string | null => {
+  if (!path) return null;
+  return path.startsWith('remote://') ? normalizeRemotePath(path) : path;
+};
 
 interface DualPaneState {
   leftRoot: string | null;
@@ -45,9 +51,19 @@ export const useDualPaneStore = create<DualPaneState>()(
       rightAnchor: null,
 
       setLeftRoot: (path) =>
-        set({ leftRoot: path, leftSelection: [], leftCwd: null, leftExpandedIds: [] }),
+        set({
+          leftRoot: normalizeRoot(path),
+          leftSelection: [],
+          leftCwd: null,
+          leftExpandedIds: [],
+        }),
       setRightRoot: (path) =>
-        set({ rightRoot: path, rightSelection: [], rightCwd: null, rightExpandedIds: [] }),
+        set({
+          rightRoot: normalizeRoot(path),
+          rightSelection: [],
+          rightCwd: null,
+          rightExpandedIds: [],
+        }),
       setActivePane: (pane) => set({ activePane: pane }),
 
       setSelection: (pane, paths) => {
@@ -68,10 +84,11 @@ export const useDualPaneStore = create<DualPaneState>()(
       isExpanded: (pane, nodeId) => expandedFor(pane, get()).includes(nodeId),
 
       setCwd: (pane, path) => {
+        const next = normalizeRoot(path);
         if (pane === 'left') {
-          set({ leftCwd: path, leftSelection: [] });
+          set({ leftCwd: next, leftSelection: [] });
         } else {
-          set({ rightCwd: path, rightSelection: [] });
+          set({ rightCwd: next, rightSelection: [] });
         }
       },
 
@@ -109,6 +126,17 @@ export const useDualPaneStore = create<DualPaneState>()(
         leftCwd: state.leftCwd,
         rightCwd: state.rightCwd,
       }),
+      merge: (persisted, current) => {
+        const p = (persisted || {}) as Partial<DualPaneState>;
+        return {
+          ...current,
+          ...p,
+          leftRoot: normalizeRoot(p.leftRoot ?? null),
+          rightRoot: normalizeRoot(p.rightRoot ?? null),
+          leftCwd: normalizeRoot(p.leftCwd ?? null),
+          rightCwd: normalizeRoot(p.rightCwd ?? null),
+        };
+      },
     }
   )
 );

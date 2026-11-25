@@ -78,6 +78,8 @@ interface FileState {
   setSortField: (field: SortField) => void;
   setSortOrder: (order: SortOrder) => void;
   toggleShowHidden: () => void;
+  /** Drop cached listings and re-scan (after delete/move/copy). */
+  invalidatePaths: (paths: string[]) => Promise<void>;
   // 重命名文件/文件夹
   renameFile: (oldPath: string, newName: string) => Promise<{ success: boolean; error?: string }>;
   // Compatibility: get first path as currentPath
@@ -325,6 +327,47 @@ export const useFileStore = create<FileState>((set, get) => ({
   setSortField: (field: SortField) => set({ sortField: field }),
   setSortOrder: (order: SortOrder) => set({ sortOrder: order }),
   toggleShowHidden: () => set((state) => ({ showHidden: !state.showHidden })),
+
+  invalidatePaths: async (paths: string[]) => {
+    const unique = [...new Set(paths.filter((p) => Boolean(p)))];
+    if (!unique.length) return;
+
+    set((state) => {
+      const nodesMap = { ...state.nodesMap };
+      const loadingPaths = new Set(state.loadingPaths);
+      for (const p of unique) {
+        delete nodesMap[p];
+        loadingPaths.add(p);
+      }
+      return { nodesMap, loadingPaths };
+    });
+
+    await Promise.all(
+      unique.map(async (path) => {
+        try {
+          const nodes = await fileService.scanDirectory(path);
+          const loaded = nodes.map((node) => ({
+            ...node,
+            is_loaded: node.is_dir ? false : true,
+          }));
+          set((state) => {
+            const loadingPaths = new Set(state.loadingPaths);
+            loadingPaths.delete(path);
+            return {
+              nodesMap: { ...state.nodesMap, [path]: loaded },
+              loadingPaths,
+            };
+          });
+        } catch {
+          set((state) => {
+            const loadingPaths = new Set(state.loadingPaths);
+            loadingPaths.delete(path);
+            return { loadingPaths };
+          });
+        }
+      })
+    );
+  },
 
   renameFile: async (oldPath: string, newName: string) => {
     try {

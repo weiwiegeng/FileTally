@@ -781,11 +781,21 @@ pub async fn remote_path_info(
 }
 
 /// Recursively list files under a remote directory (for search / transfer counting).
+fn smb_mtime_secs(entry: &DirectoryEntry) -> i64 {
+    entry
+        .modified
+        .to_system_time()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Recursively list files: `(remote_path, size, is_dir, mtime_unix_secs)`.
 pub async fn walk_remote_files(
     store: &RemoteSessionStore,
     conn_id: &str,
     rel: &str,
-    out: &mut Vec<(String, u64, bool)>,
+    out: &mut Vec<(String, u64, bool, i64)>,
     cap: usize,
 ) -> Result<(), String> {
     if out.len() >= cap {
@@ -814,11 +824,12 @@ pub async fn walk_remote_files(
                     format!("{rel}/{}", e.name)
                 };
                 let remote_path = join_remote_path(conn_id, &child_rel);
+                let mtime = smb_mtime_secs(&e);
                 if e.is_directory {
-                    out.push((remote_path, e.size, true));
+                    out.push((remote_path, e.size, true, mtime));
                     Box::pin(walk_remote_files(store, conn_id, &child_rel, out, cap)).await?;
                 } else {
-                    out.push((remote_path, e.size, false));
+                    out.push((remote_path, e.size, false, mtime));
                 }
             }
             Ok(())
@@ -1020,7 +1031,7 @@ pub async fn transfer_remote_to_local_job(
     let mut files = Vec::new();
     walk_remote_files(store, &conn_id, &rel, &mut files, 50_000).await?;
 
-    for (rpath, _size, is_directory) in files {
+    for (rpath, _size, is_directory, _mtime) in files {
         if job_id > 0 && crate::job_runner::is_cancelled(job_id) {
             return Err(err::code("transfer_cancelled"));
         }
@@ -1305,7 +1316,7 @@ async fn delete_remote_tree(store: &RemoteSessionStore, remote_path: &str) -> Re
     let mut files = Vec::new();
     if walk_remote_files(store, &conn_id, &rel, &mut files, 500_000).await.is_ok() && !files.is_empty()
     {
-        let mut targets: Vec<String> = files.iter().map(|(p, _, _)| p.clone()).collect();
+        let mut targets: Vec<String> = files.iter().map(|(p, _, _, _)| p.clone()).collect();
         targets.sort_by_key(|p| std::cmp::Reverse(p.len()));
         for p in targets {
             delete_remote_path(store, &p).await?;

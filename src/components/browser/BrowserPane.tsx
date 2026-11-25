@@ -29,7 +29,7 @@ import { useThemeColors } from '../../hooks';
 import { isRemotePath, getPathName } from '../../utils/format';
 import { fileService } from '../../services';
 import { invoke } from '@tauri-apps/api/core';
-import { parentPath, isPathUnderRoot } from '../../utils/pathNav';
+import { parentPath, isPathUnderRoot, normalizeRemotePath, pathsEqual } from '../../utils/pathNav';
 
 const { Text } = Typography;
 
@@ -119,12 +119,13 @@ export const BrowserPane: React.FC<BrowserPaneProps> = ({
   const enterFolder = useCallback(
     (path: string) => {
       if (!root || !isPathUnderRoot(root, path)) return;
-      if (path === root) {
+      const next = path.startsWith('remote://') ? normalizeRemotePath(path) : path;
+      if (pathsEqual(next, root)) {
         setCwd(side, null);
         return;
       }
-      setCwd(side, path);
-      void fileService.scanDirectory(path).catch(() => undefined);
+      setCwd(side, next);
+      void fileService.scanDirectory(next).catch(() => undefined);
     },
     [root, setCwd, side]
   );
@@ -134,7 +135,7 @@ export const BrowserPane: React.FC<BrowserPaneProps> = ({
     if (cwd) {
       const parent = parentPath(cwd);
       if (parent && isPathUnderRoot(root, parent)) {
-        setCwd(side, parent === root ? null : parent);
+        setCwd(side, pathsEqual(parent, root) ? null : parent);
       } else {
         setCwd(side, null);
       }
@@ -142,8 +143,9 @@ export const BrowserPane: React.FC<BrowserPaneProps> = ({
     }
     const parent = parentPath(root);
     if (parent) {
-      setRoot(parent);
-      void addPath(parent);
+      const next = parent.startsWith('remote://') ? normalizeRemotePath(parent) : parent;
+      setRoot(next);
+      void addPath(next);
     }
   }, [root, cwd, setCwd, side, setRoot, addPath]);
 

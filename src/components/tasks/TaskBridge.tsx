@@ -220,6 +220,63 @@ export const TaskBridge: React.FC = () => {
           });
         })
       );
+
+      unlisteners.push(
+        await listen<{
+          jobId: number;
+          stage: string;
+          current: number;
+          total: number;
+          message: string;
+        }>('sync-progress', (event) => {
+          const p = event.payload;
+          const { tasks, updateProgress, upsertTask, completeTask } = useTaskStore.getState();
+          let task = tasks.find(
+            (x) =>
+              x.kind === 'sync' &&
+              (x.backendJobId === p.jobId ||
+                ((x.status === 'running' || x.status === 'queued') && !x.backendJobId))
+          );
+          const displayMessage =
+            p.message ||
+            (p.stage === 'syncing'
+              ? t('sync.progressStarting')
+              : p.stage === 'deleting'
+                ? t('sync.progressDeleting')
+                : p.message);
+          if (!task) {
+            const id = makeTaskId('sync', p.jobId);
+            upsertTask({
+              id,
+              kind: 'sync',
+              title: t('tasks.kind.sync'),
+              status: 'running',
+              backendJobId: p.jobId,
+              progress: {
+                current: p.current,
+                total: p.total,
+                percentage: p.total > 0 ? Math.round((p.current / p.total) * 100) : 0,
+                message: displayMessage,
+                stage: p.stage,
+              },
+              startedAt: Date.now(),
+              cancellable: true,
+            });
+            return;
+          }
+          if (p.stage === 'done' || p.stage === 'cancelled') {
+            completeTask(task.id, p.stage === 'cancelled' ? 'cancelled' : 'completed');
+            return;
+          }
+          updateProgress(task.id, {
+            current: p.current,
+            total: p.total,
+            message: displayMessage,
+            stage: p.stage,
+            status: 'running',
+          });
+        })
+      );
     };
 
     void bind();

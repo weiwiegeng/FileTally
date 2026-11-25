@@ -81,11 +81,11 @@ async fn collect_remote_rename_preview(
     pattern: &str,
 ) -> Result<Vec<OrganizeChange>, String> {
     let (conn_id, base_rel) = parse_remote_path(root)?;
-    let mut files: Vec<(String, u64, bool)> = Vec::new();
+    let mut files: Vec<(String, u64, bool, i64)> = Vec::new();
     walk_remote_files(store, &conn_id, &base_rel, &mut files, 200_000).await?;
     let mut out = Vec::new();
     let mut index = 1usize;
-    for (remote_path, _, is_dir) in files {
+    for (remote_path, _, is_dir, _) in files {
         if is_dir {
             continue;
         }
@@ -146,10 +146,10 @@ async fn collect_remote_by_ext_preview(
     root: &str,
 ) -> Result<Vec<OrganizeChange>, String> {
     let (conn_id, base_rel) = parse_remote_path(root)?;
-    let mut files: Vec<(String, u64, bool)> = Vec::new();
+    let mut files: Vec<(String, u64, bool, i64)> = Vec::new();
     walk_remote_files(store, &conn_id, &base_rel, &mut files, 200_000).await?;
     let mut out = Vec::new();
-    for (remote_path, _, is_dir) in files {
+    for (remote_path, _, is_dir, _) in files {
         if is_dir {
             continue;
         }

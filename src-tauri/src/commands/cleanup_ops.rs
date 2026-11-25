@@ -91,15 +91,38 @@ fn is_cleanup_allowed_path(path: &Path) -> bool {
         None => return false,
     };
 
-    let allowed_roots = [
-        home.join("Library/Caches"),
-        PathBuf::from("/private/var/folders"),
+    #[allow(unused_mut)]
+    let mut allowed_roots: Vec<PathBuf> = vec![
+        home.join("Downloads"),
         PathBuf::from("/tmp"),
         PathBuf::from("/private/tmp"),
-        home.join(".Trash"),
-        home.join("Downloads"),
+        PathBuf::from("/private/var/folders"),
+        home.join("Library/Caches"),
         home.join("Library/Logs"),
+        home.join(".Trash"),
     ];
+
+    #[cfg(windows)]
+    {
+        if let Some(local) = dirs::data_local_dir() {
+            allowed_roots.push(local.join("Temp"));
+            allowed_roots.push(local.join("tmp"));
+        }
+        if let Ok(tmp) = std::env::var("TEMP") {
+            allowed_roots.push(PathBuf::from(tmp));
+        }
+        if let Ok(tmp) = std::env::var("TMP") {
+            allowed_roots.push(PathBuf::from(tmp));
+        }
+        allowed_roots.push(home.join("AppData").join("Local").join("Temp"));
+        allowed_roots.push(
+            home.join("AppData")
+                .join("Local")
+                .join("Microsoft")
+                .join("Windows")
+                .join("INetCache"),
+        );
+    }
 
     let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     for root in &allowed_roots {
@@ -112,14 +135,20 @@ fn is_cleanup_allowed_path(path: &Path) -> bool {
         }
     }
 
-    // Single log files directly under ~/Library/Logs or with .log suffix in known log roots
+    // Single log files under known log roots
     if path.extension().and_then(|e| e.to_str()) == Some("log") {
         let parent = path.parent().unwrap_or(path);
         if let Ok(pc) = fs::canonicalize(parent) {
-            let logs = home.join("Library/Logs");
-            if let Ok(lc) = fs::canonicalize(&logs) {
-                if pc.starts_with(&lc) {
-                    return true;
+            let log_roots = [
+                home.join("Library/Logs"),
+                #[cfg(windows)]
+                home.join("AppData").join("Local").join("Temp"),
+            ];
+            for logs in &log_roots {
+                if let Ok(lc) = fs::canonicalize(logs) {
+                    if pc.starts_with(&lc) {
+                        return true;
+                    }
                 }
             }
         }

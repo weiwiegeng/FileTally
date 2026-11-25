@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Typography,
   Space,
@@ -29,7 +29,6 @@ import {
 } from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
 import { useThemeColors } from '../../hooks';
 import { mapBackendError } from '../../utils/backendError';
@@ -41,6 +40,7 @@ import {
   type SyncMode,
 } from '../../stores';
 import { formatSize } from '../../utils/format';
+import { withSyncLock } from '../../utils/syncLock';
 
 const { Title, Text } = Typography;
 
@@ -61,7 +61,7 @@ interface SyncCompareResult {
 export const SyncPanel: React.FC = () => {
   const { t } = useTranslation();
   const colors = useThemeColors();
-  const { upsertTask, completeTask, updateProgress } = useTaskStore();
+  const { upsertTask, completeTask } = useTaskStore();
   const { presets, addPreset, removePreset, updatePreset } = useSyncPresetsStore();
   const [source, setSource] = useState('');
   const [target, setTarget] = useState('');
@@ -77,40 +77,6 @@ export const SyncPanel: React.FC = () => {
     'all' | 'added' | 'changed' | 'extra' | 'conflicts'
   >('all');
   const [comparedOnce, setComparedOnce] = useState(false);
-
-  useEffect(() => {
-    let u: UnlistenFn | undefined;
-    void listen<{
-      jobId: number;
-      stage: string;
-      current: number;
-      total: number;
-      message: string;
-    }>('sync-progress', (e) => {
-      const p = e.payload;
-      const tasks = useTaskStore.getState().tasks;
-      const task = tasks.find(
-        (x) => x.kind === 'sync' && (x.backendJobId === p.jobId || x.status === 'running')
-      );
-      if (!task) return;
-      if (p.stage === 'done' || p.stage === 'cancelled') {
-        completeTask(task.id, p.stage === 'cancelled' ? 'cancelled' : 'completed');
-        return;
-      }
-      updateProgress(task.id, {
-        current: p.current,
-        total: p.total,
-        message: p.message,
-        stage: p.stage,
-        status: 'running',
-      });
-    }).then((fn) => {
-      u = fn;
-    });
-    return () => {
-      u?.();
-    };
-  }, [completeTask, updateProgress]);
 
   const pick = async (setter: (v: string) => void) => {
     const selected = await open({ directory: true, multiple: false });
@@ -180,28 +146,30 @@ export const SyncPanel: React.FC = () => {
     setLoading(true);
     let taskId = '';
     try {
-      const jobId = await (await import('../../utils/jobs')).prepareJob('sync');
-      taskId = makeTaskId('sync', jobId);
-      upsertTask({
-        id: taskId,
-        kind: 'sync',
-        title: `${source} → ${target}`,
-        status: 'running',
-        backendJobId: jobId,
-        progress: { current: 0, total: 0, percentage: 0 },
-        startedAt: Date.now(),
-        cancellable: true,
-      });
-      const result = await invoke<SyncCompareResult>('run_sync', {
-        source,
-        dest: target,
-        deleteExtras: deleteExtra,
-        jobId,
-        mode: syncMode,
-        conflictResolution,
+      const result = await withSyncLock(async () => {
+        const jobId = await (await import('../../utils/jobs')).prepareJob('sync');
+        taskId = makeTaskId('sync', jobId);
+        upsertTask({
+          id: taskId,
+          kind: 'sync',
+          title: `${source} → ${target}`,
+          status: 'running',
+          backendJobId: jobId,
+          progress: { current: 0, total: 0, percentage: 0 },
+          startedAt: Date.now(),
+          cancellable: true,
+        });
+        return invoke<SyncCompareResult>('run_sync', {
+          source,
+          dest: target,
+          deleteExtras: deleteExtra,
+          jobId,
+          mode: syncMode,
+          conflictResolution,
+        });
       });
       setDiff(result);
-      completeTask(taskId, 'completed');
+      if (taskId) completeTask(taskId, 'completed');
       message.success(t('sync.done'));
       const match = presets.find((p) => p.source === source && p.dest === target);
       if (match) {
@@ -212,7 +180,10 @@ export const SyncPanel: React.FC = () => {
         });
       }
     } catch (e) {
-      const errText = mapBackendError(e);
+      const errText =
+        e instanceof Error && e.message === 'sync_already_running'
+          ? t('errors.sync_already_running')
+          : mapBackendError(e);
       if (taskId) completeTask(taskId, 'failed', errText);
       message.error(errText);
       const match = presets.find((p) => p.source === source && p.dest === target);

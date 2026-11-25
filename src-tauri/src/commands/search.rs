@@ -439,7 +439,7 @@ async fn search_remote_paths(
             files.truncate(CAP);
         }
 
-        for (rpath, _size, is_dir) in files {
+        for (rpath, _size, is_dir, _mtime) in files {
             if is_dir {
                 continue;
             }

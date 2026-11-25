@@ -9,7 +9,15 @@ import {
   resumePersistedTransferQueue,
   useSettingsStore,
   useDualPaneStore,
+  useRemoteStore,
 } from '../stores';
+
+function connectionIdFromRemotePath(path: string): string | null {
+  if (!path.startsWith('remote://')) return null;
+  const rest = path.slice('remote://'.length);
+  const id = rest.split('/')[0];
+  return id || null;
+}
 
 /** One-shot app boot: restore transfer bandwidth / concurrency; resume queued transfers. */
 export const BootstrapEffects: React.FC = () => {
@@ -37,17 +45,51 @@ export const BootstrapEffects: React.FC = () => {
         ['right', rightRoot, setRightRoot] as const,
       ]) {
         if (!path) continue;
+        // remote:// sessions are in-memory; no session yet ≠ missing share — keep the root.
+        if (path.startsWith('remote://')) continue;
         try {
           const ok = await invoke<boolean>('check_path_exists', { path });
           if (!ok) {
             clear(null);
             notification.warning({
               message: t('browser.dualPane.rootMissingTitle'),
-              description: t('browser.dualPane.rootMissingBody', { side: t(`browser.dualPane.pane${side === 'left' ? 'Left' : 'Right'}`) }),
+              description: t('browser.dualPane.rootMissingBody', {
+                side: t(`browser.dualPane.pane${side === 'left' ? 'Left' : 'Right'}`),
+              }),
             });
           }
         } catch {
           /* ignore */
+        }
+      }
+    })();
+  }, [t]);
+
+  // Soft-reconnect connections referenced by persisted dual-pane remote roots.
+  useEffect(() => {
+    void (async () => {
+      const { leftRoot, rightRoot } = useDualPaneStore.getState();
+      const remote = useRemoteStore.getState();
+      const ids = new Set<string>();
+      for (const path of [leftRoot, rightRoot]) {
+        if (!path) continue;
+        const id = connectionIdFromRemotePath(path);
+        if (id) ids.add(id);
+      }
+      for (const id of ids) {
+        const conn = remote.getConnection(id);
+        if (!conn || conn.status === 'connected' || conn.status === 'connecting') continue;
+        const ok = await useRemoteStore.getState().connect(id);
+        if (ok) {
+          notification.success({
+            message: t('browser.dualPane.reconnectOk', { name: conn.name }),
+            duration: 3,
+          });
+        } else {
+          notification.warning({
+            message: t('browser.dualPane.reconnectFail', { name: conn.name }),
+            duration: 5,
+          });
         }
       }
     })();
