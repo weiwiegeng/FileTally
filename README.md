@@ -58,11 +58,19 @@ npm test
 CARGO_TARGET_DIR=target cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
 
-**发布构建：**
+**本地发布构建：**
 
 ```bash
 npm run tauri:build
 ./build.sh windows   # 或 macos / all → release/
+```
+
+**GitHub 多平台安装包：** 日常 push / PR 只跑 [CI](.github/workflows/ci.yml)（类型检查与测试）。打标签后 [Release](.github/workflows/release.yml) 会在 Windows / macOS (Intel + Apple Silicon) / Linux 上构建，并挂到 **Draft Release**：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+# 或在 Actions → Release → Run workflow
 ```
 
 ## 许可证
