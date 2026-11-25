@@ -1211,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "filetally"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1219,6 +1219,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "encoding_rs",
+ "futures-util",
  "keyring",
  "pdf-extract",
  "rayon",

@@ -265,6 +265,7 @@ export const MainLayout: React.FC = () => {
       label: t('menu.groupWorkspace'),
       items: [
         { key: 'browser', icon: <FolderOutlined />, label: t('menu.fileBrowser') },
+        { key: 'remote', icon: <CloudServerOutlined />, label: t('menu.remoteConnect') },
         { key: 'filter', icon: <SearchOutlined />, label: t('menu.smartSearch') },
       ],
     },
@@ -287,7 +288,6 @@ export const MainLayout: React.FC = () => {
       label: t('menu.groupMore'),
       items: [
         { key: 'disk', icon: <DatabaseOutlined />, label: t('menu.diskMonitor') },
-        { key: 'remote', icon: <CloudServerOutlined />, label: t('menu.remoteConnect') },
         { key: 'excel', icon: <FileExcelOutlined />, label: t('menu.excelCheck') },
         { key: 'ai', icon: <RobotOutlined />, label: t('menu.aiAnalysis') },
       ],

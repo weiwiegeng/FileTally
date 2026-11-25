@@ -179,6 +179,40 @@ pub fn sftp_read_file(session: &SftpSession, rel: &str) -> Result<Vec<u8>, Strin
     })
 }
 
+/// Ensure a remote relative directory (and parents) exists.
+pub fn sftp_ensure_rel_dirs(session: &SftpSession, rel: &str) -> Result<(), String> {
+    let rel = rel.trim_matches('/');
+    if rel.is_empty() {
+        return Ok(());
+    }
+    let abs = remote_path(session, rel);
+    with_sftp(session, |sftp| sftp_ensure_dirs(sftp, Path::new(&abs)))
+}
+
+fn sftp_ensure_dirs(sftp: &Sftp, abs_dir: &Path) -> Result<(), String> {
+    if abs_dir.as_os_str().is_empty() || abs_dir == Path::new("/") {
+        return Ok(());
+    }
+    if sftp.stat(abs_dir).is_ok() {
+        return Ok(());
+    }
+    if let Some(parent) = abs_dir.parent() {
+        sftp_ensure_dirs(sftp, parent)?;
+    }
+    match sftp.mkdir(abs_dir, 0o755) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Race / already exists
+            if sftp.stat(abs_dir).map(|s| s.file_type().is_dir()).unwrap_or(false) {
+                Ok(())
+            } else {
+                Err(err::with_detail("sftp_write_failed", e))
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
 pub fn sftp_write_file(session: &SftpSession, rel: &str, data: &[u8]) -> Result<(), String> {
     if rel.trim().is_empty() {
         return Err(err::code("remote_path_is_dir"));
@@ -186,7 +220,7 @@ pub fn sftp_write_file(session: &SftpSession, rel: &str, data: &[u8]) -> Result<
     let path = remote_path(session, rel);
     with_sftp(session, |sftp| {
         if let Some(parent) = Path::new(&path).parent() {
-            let _ = sftp.mkdir(parent, 0o755);
+            sftp_ensure_dirs(sftp, parent)?;
         }
         let mut file = sftp
             .create(Path::new(&path))
@@ -194,6 +228,78 @@ pub fn sftp_write_file(session: &SftpSession, rel: &str, data: &[u8]) -> Result<
         use std::io::Write;
         file.write_all(data)
             .map_err(|e| err::with_detail("sftp_write_failed", e))?;
+        Ok(())
+    })
+}
+
+/// Stream remote → local in chunks (avoids loading the whole file into RAM).
+pub fn sftp_download_to_file(
+    session: &SftpSession,
+    rel: &str,
+    local_path: &Path,
+) -> Result<(), String> {
+    if rel.trim().is_empty() {
+        return Err(err::code("remote_path_is_dir"));
+    }
+    let path = remote_path(session, rel);
+    with_sftp(session, |sftp| {
+        if let Some(parent) = local_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| err::with_detail("copy_failed", e))?;
+        }
+        let mut remote = sftp
+            .open(Path::new(&path))
+            .map_err(|e| err::with_detail("sftp_read_failed", e))?;
+        let mut local =
+            std::fs::File::create(local_path).map_err(|e| err::with_detail("copy_failed", e))?;
+        let mut buf = [0u8; 65_536];
+        loop {
+            let n = remote
+                .read(&mut buf)
+                .map_err(|e| err::with_detail("sftp_read_failed", e))?;
+            if n == 0 {
+                break;
+            }
+            use std::io::Write;
+            local
+                .write_all(&buf[..n])
+                .map_err(|e| err::with_detail("copy_failed", e))?;
+        }
+        Ok(())
+    })
+}
+
+/// Stream local → remote in chunks; creates parent directories as needed.
+pub fn sftp_upload_from_file(
+    session: &SftpSession,
+    rel: &str,
+    local_path: &Path,
+) -> Result<(), String> {
+    if rel.trim().is_empty() {
+        return Err(err::code("remote_path_is_dir"));
+    }
+    let path = remote_path(session, rel);
+    with_sftp(session, |sftp| {
+        if let Some(parent) = Path::new(&path).parent() {
+            sftp_ensure_dirs(sftp, parent)?;
+        }
+        let mut local =
+            std::fs::File::open(local_path).map_err(|e| err::with_detail("copy_failed", e))?;
+        let mut remote = sftp
+            .create(Path::new(&path))
+            .map_err(|e| err::with_detail("sftp_write_failed", e))?;
+        let mut buf = [0u8; 65_536];
+        loop {
+            let n = local
+                .read(&mut buf)
+                .map_err(|e| err::with_detail("copy_failed", e))?;
+            if n == 0 {
+                break;
+            }
+            use std::io::Write;
+            remote
+                .write_all(&buf[..n])
+                .map_err(|e| err::with_detail("sftp_write_failed", e))?;
+        }
         Ok(())
     })
 }
@@ -218,6 +324,17 @@ pub fn sftp_stat_is_dir(session: &SftpSession, rel: &str) -> Result<bool, String
             .map_err(|e| err::with_detail("sftp_stat_failed", e))?;
         Ok(stat.file_type().is_dir())
     })
+}
+
+pub fn sftp_path_exists(session: &SftpSession, rel: &str) -> bool {
+    if rel.trim().is_empty() {
+        return true;
+    }
+    let path = remote_path(session, rel);
+    with_sftp(session, |sftp| {
+        Ok(sftp.stat(Path::new(&path)).is_ok())
+    })
+    .unwrap_or(false)
 }
 
 pub fn walk_sftp_files(

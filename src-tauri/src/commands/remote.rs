@@ -625,14 +625,21 @@ pub async fn remote_path_exists_inner(
                 session.client.stat(&mut session.share, &rel).await.is_ok()
             }
         }
-        Some(RemoteSession::WebDav { .. }) => !rel.is_empty(),
+        Some(RemoteSession::WebDav {
+            inner,
+            username,
+            password,
+        }) => {
+            let inner = inner.clone();
+            let username = username.clone();
+            let password = password.clone();
+            drop(guard);
+            let (exists, _) =
+                super::remote_webdav::webdav_stat(&inner, &rel, &username, &password).await?;
+            return Ok(exists);
+        }
         Some(RemoteSession::Sftp(session)) => {
-            if rel.is_empty() {
-                true
-            } else {
-                super::remote_sftp::sftp_stat_is_dir(session, &rel).is_ok()
-                    || super::remote_sftp::sftp_read_file(session, &rel).is_ok()
-            }
+            super::remote_sftp::sftp_path_exists(session, &rel)
         }
     };
     Ok(exists)
@@ -860,8 +867,36 @@ pub async fn download_remote_file(
     remote_path: &str,
     local_path: &Path,
 ) -> Result<(), String> {
-    let data = read_remote_file_bytes(store, remote_path, 0).await?;
+    let (conn_id, rel) = parse_remote_path(remote_path)?;
+    if rel.is_empty() {
+        return Err(err::code("smb_path_is_dir"));
+    }
 
+    let mut guard = store.inner.lock().await;
+    match guard.get_mut(&conn_id) {
+        Some(RemoteSession::WebDav {
+            inner,
+            username,
+            password,
+        }) => {
+            let inner = inner.clone();
+            let username = username.clone();
+            let password = password.clone();
+            drop(guard);
+            return super::remote_webdav::webdav_download_to_file(
+                &inner, &rel, local_path, &username, &password,
+            )
+            .await;
+        }
+        Some(RemoteSession::Sftp(session)) => {
+            return super::remote_sftp::sftp_download_to_file(session, &rel, local_path);
+        }
+        Some(RemoteSession::Smb(_)) | None => {}
+    }
+    drop(guard);
+
+    // SMB (and fallback): pipelined read into memory then write.
+    let data = read_remote_file_bytes(store, remote_path, 0).await?;
     if let Some(parent) = local_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| err::with_detail("copy_failed", e))?;
     }
@@ -880,21 +915,8 @@ pub async fn upload_local_file(
         return Err(err::code("smb_path_is_dir"));
     }
 
-    let data = std::fs::read(local_path).map_err(|e| err::with_detail("copy_failed", e))?;
-
     let mut guard = store.inner.lock().await;
     match guard.get_mut(&conn_id) {
-        Some(RemoteSession::Smb(session)) => {
-            if let Some((parent, _)) = rel.rsplit_once('/') {
-                ensure_remote_dirs(session, parent).await?;
-            }
-            session
-                .client
-                .write_file_pipelined(&session.share, &rel, &data)
-                .await
-                .map_err(map_smb_err)?;
-            Ok(())
-        }
         Some(RemoteSession::WebDav {
             inner,
             username,
@@ -904,10 +926,25 @@ pub async fn upload_local_file(
             let username = username.clone();
             let password = password.clone();
             drop(guard);
-            super::remote_webdav::webdav_write_file(&inner, &rel, &data, &username, &password).await
+            return super::remote_webdav::webdav_upload_from_file(
+                &inner, &rel, local_path, &username, &password,
+            )
+            .await;
         }
         Some(RemoteSession::Sftp(session)) => {
-            super::remote_sftp::sftp_write_file(session, &rel, &data)
+            return super::remote_sftp::sftp_upload_from_file(session, &rel, local_path);
+        }
+        Some(RemoteSession::Smb(session)) => {
+            let data = std::fs::read(local_path).map_err(|e| err::with_detail("copy_failed", e))?;
+            if let Some((parent, _)) = rel.rsplit_once('/') {
+                ensure_remote_dirs(session, parent).await?;
+            }
+            session
+                .client
+                .write_file_pipelined(&session.share, &rel, &data)
+                .await
+                .map_err(map_smb_err)?;
+            Ok(())
         }
         None => Err(session_missing()),
     }
@@ -972,7 +1009,22 @@ pub async fn transfer_remote_to_local_job(
             Some(RemoteSession::Sftp(session)) => {
                 super::remote_sftp::sftp_stat_is_dir(session, &rel)?
             }
-            Some(RemoteSession::WebDav { .. }) => false,
+            Some(RemoteSession::WebDav {
+                inner,
+                username,
+                password,
+            }) => {
+                let inner = inner.clone();
+                let username = username.clone();
+                let password = password.clone();
+                drop(guard);
+                let (exists, is_dir) =
+                    super::remote_webdav::webdav_stat(&inner, &rel, &username, &password).await?;
+                if !exists {
+                    return Err(err::code("source_missing"));
+                }
+                is_dir
+            }
             None => return Err(session_missing()),
         }
     };
@@ -1142,8 +1194,26 @@ pub async fn transfer_local_to_remote_job(
 
     {
         let mut guard = store.inner.lock().await;
-        if let Some(RemoteSession::Smb(session)) = guard.get_mut(&conn_id) {
-            ensure_remote_dirs(session, &root_rel).await?;
+        match guard.get_mut(&conn_id) {
+            Some(RemoteSession::Smb(session)) => {
+                ensure_remote_dirs(session, &root_rel).await?;
+            }
+            Some(RemoteSession::WebDav {
+                inner,
+                username,
+                password,
+            }) => {
+                let inner = inner.clone();
+                let username = username.clone();
+                let password = password.clone();
+                drop(guard);
+                super::remote_webdav::webdav_ensure_dirs(&inner, &root_rel, &username, &password)
+                    .await?;
+            }
+            Some(RemoteSession::Sftp(session)) => {
+                super::remote_sftp::sftp_ensure_rel_dirs(session, &root_rel)?;
+            }
+            None => return Err(session_missing()),
         }
     }
 
@@ -1166,11 +1236,38 @@ pub async fn transfer_local_to_remote_job(
 
         if path.is_dir() {
             let mut guard = store.inner.lock().await;
-            if let Some(RemoteSession::Smb(session)) = guard.get_mut(&conn_id) {
-                if let Err(e) = ensure_remote_dirs(session, &remote_rel).await {
-                    failed += 1;
-                    errors.push(e);
+            match guard.get_mut(&conn_id) {
+                Some(RemoteSession::Smb(session)) => {
+                    if let Err(e) = ensure_remote_dirs(session, &remote_rel).await {
+                        failed += 1;
+                        errors.push(e);
+                    }
                 }
+                Some(RemoteSession::WebDav {
+                    inner,
+                    username,
+                    password,
+                }) => {
+                    let inner = inner.clone();
+                    let username = username.clone();
+                    let password = password.clone();
+                    drop(guard);
+                    if let Err(e) = super::remote_webdav::webdav_ensure_dirs(
+                        &inner, &remote_rel, &username, &password,
+                    )
+                    .await
+                    {
+                        failed += 1;
+                        errors.push(e);
+                    }
+                }
+                Some(RemoteSession::Sftp(session)) => {
+                    if let Err(e) = super::remote_sftp::sftp_ensure_rel_dirs(session, &remote_rel) {
+                        failed += 1;
+                        errors.push(e);
+                    }
+                }
+                None => {}
             }
             continue;
         }

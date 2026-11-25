@@ -28,9 +28,13 @@ export const RemoteConnect: React.FC = () => {
     setEditingConnection(undefined);
   };
 
+  const openAdd = () => {
+    setEditingConnection(undefined);
+    setShowAddModal(true);
+  };
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      {/* Header */}
       <div
         style={{
           padding: '16px 24px',
@@ -38,53 +42,41 @@ export const RemoteConnect: React.FC = () => {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
+          gap: 16,
+          flexWrap: 'wrap',
         }}
       >
-        <Space>
-          <CloudServerOutlined style={{ fontSize: 24, color: colors.accentPurple }} />
-          <Title level={4} style={{ margin: 0, color: colors.textPrimary }}>
-            {t('remote.connect.title')}
-          </Title>
-        </Space>
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={() => setShowAddModal(true)}
-        >
+        <div>
+          <Space align="center">
+            <CloudServerOutlined style={{ fontSize: 22, color: colors.accentBlue }} />
+            <Title level={4} style={{ margin: 0, color: colors.textPrimary }}>
+              {t('remote.connect.title')}
+            </Title>
+          </Space>
+          <Text
+            type="secondary"
+            style={{ fontSize: 13, display: 'block', marginTop: 4, marginLeft: 30 }}
+          >
+            {t('remote.connect.subtitle')}
+          </Text>
+        </div>
+        <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>
           {t('remote.connect.addConnection')}
         </Button>
       </div>
 
-      {/* 说明信息 */}
-      <div
-        style={{
-          padding: '12px 24px',
-          background: colors.isDark ? 'rgba(114, 46, 209, 0.1)' : 'rgba(114, 46, 209, 0.05)',
-          borderBottom: `1px solid ${colors.border}`,
-        }}
-      >
-        <Text type="secondary" style={{ fontSize: 13, display: 'block' }}>
-          {t('remote.connect.infoLine1')}
-        </Text>
-        <Text type="secondary" style={{ fontSize: 13, display: 'block' }}>
-          {t('remote.connect.infoLine2')}
-        </Text>
-      </div>
-
-      {/* Content */}
       <div style={{ flex: 1, overflow: 'auto', padding: 24 }}>
-        <ConnectionList
-          onEdit={handleEdit}
-        />
+        <ConnectionList onEdit={handleEdit} onAdd={openAdd} />
       </div>
 
-      {/* 添加/编辑连接对话框 */}
       <Modal
         title={editingConnection ? t('remote.connect.modalEdit') : t('remote.connect.modalAdd')}
         open={showAddModal}
         onCancel={handleModalClose}
         footer={null}
         destroyOnClose
+        width={520}
+        styles={{ body: { paddingTop: 12 } }}
       >
         <ConnectionForm
           editingConnection={editingConnection}

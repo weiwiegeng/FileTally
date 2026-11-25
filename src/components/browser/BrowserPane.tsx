@@ -23,6 +23,7 @@ import {
   useFileStore,
   useRemoteStore,
   useDualPaneStore,
+  useNavigationStore,
   type BrowserPaneSide,
 } from '../../stores';
 import { useThemeColors } from '../../hooks';
@@ -321,10 +322,55 @@ export const BrowserPane: React.FC<BrowserPaneProps> = ({
               justifyContent: 'center',
               height: '100%',
               gap: 12,
+              padding: 16,
+              textAlign: 'center',
             }}
           >
             <FolderOpenOutlined style={{ fontSize: 48, color: colors.border }} />
-            <Text type="secondary">{t('browser.fileBrowser.emptyHint')}</Text>
+            <Text type="secondary">{t('browser.fileBrowser.emptyPaneHint')}</Text>
+            <Space wrap style={{ justifyContent: 'center' }}>
+              <Button
+                type="primary"
+                icon={<FolderOpenOutlined />}
+                onClick={() => {
+                  void fileService.pickDirectory().then((picked) => {
+                    if (picked) {
+                      setRoot(picked);
+                      void addPath(picked);
+                    }
+                  });
+                }}
+              >
+                {t('browser.fileBrowser.pickLocal')}
+              </Button>
+              <Button
+                icon={<HomeOutlined />}
+                onClick={() => {
+                  void invoke<string>('get_home_dir').then((home) => {
+                    if (home) {
+                      setRoot(home);
+                      void addPath(home);
+                    }
+                  });
+                }}
+              >
+                {t('browser.fileBrowser.homeFolder')}
+              </Button>
+              <Button
+                icon={<CloudServerOutlined />}
+                onClick={() => {
+                  if (connections.length === 0) {
+                    useNavigationStore.getState().openMenu('remote');
+                    return;
+                  }
+                  setShowRemoteSelector(true);
+                }}
+              >
+                {connections.length === 0
+                  ? t('browser.fileBrowser.addRemoteConnection')
+                  : t('browser.fileBrowser.pickRemote')}
+              </Button>
+            </Space>
           </div>
         )}
       </div>

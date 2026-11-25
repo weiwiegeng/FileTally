@@ -18,16 +18,18 @@ export const ConflictModal: React.FC = () => {
     showConflictModal,
     setShowConflictModal,
     startTransfer,
+    setPendingDeleteSources,
   } = useTransferStore();
   const colors = useThemeColors();
 
   const [resolution, setResolution] = React.useState<ConflictResolution>('rename');
 
   const handleConfirm = () => {
-    startTransfer(resolution);
+    void startTransfer(resolution);
   };
 
   const handleCancel = () => {
+    setPendingDeleteSources(null);
     setShowConflictModal(false);
   };
 

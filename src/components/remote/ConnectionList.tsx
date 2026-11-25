@@ -21,7 +21,33 @@ const { Text } = Typography;
 interface ConnectionListProps {
   onEdit?: (connection: RemoteConnection) => void;
   onBrowse?: (connection: RemoteConnection) => void;
+  onAdd?: () => void;
 }
+
+const typeLabel = (type: RemoteConnection['type'] | undefined) => {
+  if (type === 'webdav') return 'WebDAV';
+  if (type === 'sftp') return 'SFTP';
+  return 'SMB';
+};
+
+const typeColor = (type: RemoteConnection['type'] | undefined) => {
+  if (type === 'webdav') return 'purple';
+  if (type === 'sftp') return 'cyan';
+  return 'blue';
+};
+
+const endpointText = (conn: RemoteConnection) => {
+  if (conn.type === 'webdav') return conn.baseUrl || conn.host || '';
+  const host = conn.host || '';
+  const port = conn.port && conn.port !== (conn.type === 'sftp' ? 22 : 445) ? `:${conn.port}` : '';
+  return `${host}${port}`;
+};
+
+const pathText = (conn: RemoteConnection) => {
+  if (conn.type === 'webdav') return null;
+  if (conn.type === 'sftp') return conn.remoteRoot || '/';
+  return conn.share ? `/${conn.share}` : null;
+};
 
 const getStatusIcon = (status: RemoteConnection['status']) => {
   switch (status) {
@@ -39,6 +65,7 @@ const getStatusIcon = (status: RemoteConnection['status']) => {
 export const ConnectionList: React.FC<ConnectionListProps> = ({
   onEdit,
   onBrowse,
+  onAdd,
 }) => {
   const { t } = useTranslation();
   const { connections, removeConnection, connect, disconnect, connecting, getAccessRoot } =
@@ -118,13 +145,20 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
       <div
         style={{
           textAlign: 'center',
-          padding: 40,
+          padding: '56px 24px',
           color: '#8c8c8c',
         }}
       >
         <CloudServerOutlined style={{ fontSize: 48, marginBottom: 16 }} />
-        <div>{t('remote.connectionList.emptyTitle')}</div>
-        <Text type="secondary">{t('remote.connectionList.emptyHint')}</Text>
+        <div style={{ marginBottom: 8, fontSize: 15 }}>{t('remote.connectionList.emptyTitle')}</div>
+        <Text type="secondary" style={{ display: 'block', marginBottom: 20 }}>
+          {t('remote.connectionList.emptyHint')}
+        </Text>
+        {onAdd ? (
+          <Button type="primary" icon={<LinkOutlined />} onClick={onAdd}>
+            {t('remote.connect.addConnection')}
+          </Button>
+        ) : null}
       </div>
     );
   }
@@ -213,23 +247,29 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
             }}
           >
             <div style={{ marginBottom: 8 }}>
-              <Space size="small">
-                <Tag color="blue">SMB</Tag>
-                <Tag>
-                  {(conn.mode || 'direct') === 'direct'
-                    ? t('remote.connectionList.modeDirect')
-                    : t('remote.connectionList.modeSystem')}
-                </Tag>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  <GlobalOutlined /> {conn.host}
-                </Text>
+              <Space size="small" wrap>
+                <Tag color={typeColor(conn.type)}>{typeLabel(conn.type)}</Tag>
+                {conn.type === 'smb' ? (
+                  <Tag>
+                    {(conn.mode || 'direct') === 'direct'
+                      ? t('remote.connectionList.modeDirect')
+                      : t('remote.connectionList.modeSystem')}
+                  </Tag>
+                ) : null}
               </Space>
             </div>
             <div>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                <FolderOpenOutlined /> /{conn.share}
+                <GlobalOutlined /> {endpointText(conn)}
               </Text>
             </div>
+            {pathText(conn) ? (
+              <div style={{ marginTop: 4 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  <FolderOpenOutlined /> {pathText(conn)}
+                </Text>
+              </div>
+            ) : null}
             {conn.mountPoint && (
               <div style={{ marginTop: 4 }}>
                 <Text type="secondary" style={{ fontSize: 11 }} ellipsis>

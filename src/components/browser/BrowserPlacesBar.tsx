@@ -81,9 +81,7 @@ export const BrowserPlacesBar: React.FC<BrowserPlacesBarProps> = ({ targetPane }
     await openPath(path);
   };
 
-  if (favorites.length === 0 && recent.length === 0 && connections.length === 0) {
-    return null;
-  }
+  const empty = favorites.length === 0 && recent.length === 0 && connections.length === 0;
 
   return (
     <div
@@ -99,6 +97,11 @@ export const BrowserPlacesBar: React.FC<BrowserPlacesBarProps> = ({ targetPane }
       <Text type="secondary" style={{ fontSize: 11, marginRight: 4 }}>
         {t('places.barLabel')}
       </Text>
+      {empty ? (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {t('places.emptyHint')}
+        </Text>
+      ) : null}
       {favorites.slice(0, 6).map((f) => {
         const tag = getTagForPath(f.path);
         return (
@@ -147,6 +150,15 @@ export const BrowserPlacesBar: React.FC<BrowserPlacesBarProps> = ({ targetPane }
         </Tag>
       ))}
       <Space size={4}>
+        <Button
+          type="link"
+          size="small"
+          icon={<CloudServerOutlined />}
+          onClick={() => openMenu('remote')}
+          style={{ paddingInline: 4, fontSize: 12 }}
+        >
+          {t('places.addConnection')}
+        </Button>
         <Button
           type="link"
           size="small"

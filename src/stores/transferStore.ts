@@ -79,6 +79,8 @@ export interface TransferJobSnapshot {
   sourceConnectionName: string | null;
   targetConnectionName: string | null;
   direction: TransferDirection;
+  /** After a successful copy, delete these sources (remote move / migrate). */
+  deleteSourcesAfter?: string[];
 }
 
 interface TransferState {
@@ -104,7 +106,9 @@ interface TransferState {
   // 冲突处理
   conflicts: ConflictFile[];
   showConflictModal: boolean;
-  
+  /** Paths to delete after the next successful transfer (move semantics). */
+  pendingDeleteSources: string[] | null;
+
   // Actions
   setDirection: (direction: TransferDirection) => void;
   addSourceItems: (items: TransferItem[], connectionName?: string) => void;
@@ -112,7 +116,8 @@ interface TransferState {
   clearSourceItems: () => void;
   setTargetPath: (path: string, connectionName?: string) => void;
   clearTargetPath: () => void;
-  
+  setPendingDeleteSources: (paths: string[] | null) => void;
+
   // 传输操作
   checkConflicts: () => Promise<ConflictCheckResult>;
   startTransfer: (resolution: ConflictResolution, job?: TransferJobSnapshot) => Promise<void>;
@@ -202,6 +207,7 @@ const snapshotFromState = (
     | 'sourceConnectionName'
     | 'targetConnectionName'
     | 'direction'
+    | 'pendingDeleteSources'
   >
 ): TransferJobSnapshot | null => {
   if (!state.targetPath || state.sourceItems.length === 0) return null;
@@ -212,7 +218,38 @@ const snapshotFromState = (
     sourceConnectionName: state.sourceConnectionName,
     targetConnectionName: state.targetConnectionName,
     direction: state.direction,
+    deleteSourcesAfter: state.pendingDeleteSources?.length
+      ? [...state.pendingDeleteSources]
+      : undefined,
   };
+};
+
+const deleteSourcesAfterTransfer = async (paths: string[]): Promise<number> => {
+  if (!paths.length) return 0;
+  const remote = paths.filter((p) => p.startsWith('remote://'));
+  const local = paths.filter((p) => !p.startsWith('remote://'));
+  let failed = 0;
+  if (remote.length) {
+    try {
+      const result = await invoke<{ deleted: number; failed: number }>('delete_remote_paths', {
+        paths: remote,
+      });
+      failed += result.failed ?? 0;
+    } catch {
+      failed += remote.length;
+    }
+  }
+  if (local.length) {
+    try {
+      const result = await invoke<{ deleted: number; failed: number }>('trash_user_paths', {
+        paths: local,
+      });
+      failed += result.failed ?? 0;
+    } catch {
+      failed += local.length;
+    }
+  }
+  return failed;
 };
 
 export const transferRetryPayload = buildTransferRetryPayload;
@@ -232,7 +269,8 @@ export const useTransferStore = create<TransferState>((set, get) => ({
   error: null,
   conflicts: [],
   showConflictModal: false,
-  
+  pendingDeleteSources: null,
+
   setDirection: (direction) => set({
     direction,
     // 切换方向时重置所有状态
@@ -243,6 +281,7 @@ export const useTransferStore = create<TransferState>((set, get) => ({
     result: null,
     error: null,
     conflicts: [],
+    pendingDeleteSources: null,
   }),
   
   addSourceItems: (items, connectionName) => set((state) => ({
@@ -272,6 +311,8 @@ export const useTransferStore = create<TransferState>((set, get) => ({
     targetPath: null,
     targetConnectionName: null,
   }),
+
+  setPendingDeleteSources: (paths) => set({ pendingDeleteSources: paths }),
   
   checkConflicts: async () => {
     const { sourceItems, targetPath } = get();
@@ -331,10 +372,16 @@ export const useTransferStore = create<TransferState>((set, get) => ({
       targetPath: snapshot.targetPath,
       sourceConnectionName: snapshot.sourceConnectionName,
       targetConnectionName: snapshot.targetConnectionName,
+      pendingDeleteSources: snapshot.deleteSourcesAfter?.length
+        ? [...snapshot.deleteSourcesAfter]
+        : null,
     });
 
     const sourcePaths = snapshot.sourceItems.map((item) => item.sourcePath);
     const targetPath = snapshot.targetPath;
+    const deleteAfter = snapshot.deleteSourcesAfter?.length
+      ? [...snapshot.deleteSourcesAfter]
+      : [];
     
     let jobId = 0;
     try {
@@ -392,18 +439,32 @@ export const useTransferStore = create<TransferState>((set, get) => ({
         errors: (result.errors || []).map((e) => mapBackendError(e)),
       };
 
+      let deleteFailed = 0;
+      if (mapped.success && !mapped.cancelled && deleteAfter.length > 0) {
+        deleteFailed = await deleteSourcesAfterTransfer(deleteAfter);
+        if (deleteFailed > 0) {
+          mapped.errors = [
+            ...mapped.errors,
+            i18n.t('browser.dualPane.moveDeleteFailed', { count: deleteFailed }),
+          ];
+        }
+      }
+
       set({
         result: mapped,
         transferring: false,
         activeJobId: 0,
         progress: null,
+        pendingDeleteSources: null,
       });
       useTaskStore
         .getState()
         .completeTask(
           taskId,
           mapped.cancelled ? 'cancelled' : mapped.success ? 'completed' : 'failed',
-          undefined,
+          deleteFailed > 0
+            ? i18n.t('browser.dualPane.moveDeleteFailed', { count: deleteFailed })
+            : undefined,
           retryPayload
         );
 
@@ -418,6 +479,7 @@ export const useTransferStore = create<TransferState>((set, get) => ({
         transferring: false,
         activeJobId: 0,
         progress: null,
+        pendingDeleteSources: null,
       });
       useTaskStore
         .getState()
@@ -465,6 +527,7 @@ export const useTransferStore = create<TransferState>((set, get) => ({
     progress: null,
     result: null,
     error: null,
+    pendingDeleteSources: null,
     conflicts: [],
     showConflictModal: false,
   }),

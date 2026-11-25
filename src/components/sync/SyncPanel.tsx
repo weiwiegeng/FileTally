@@ -26,6 +26,7 @@ import {
   CloudSyncOutlined,
   SaveOutlined,
   DeleteOutlined,
+  CloudServerOutlined,
 } from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
@@ -41,6 +42,7 @@ import {
 } from '../../stores';
 import { formatSize } from '../../utils/format';
 import { withSyncLock } from '../../utils/syncLock';
+import { RemoteFolderSelector } from '../search/RemoteFolderSelector';
 
 const { Title, Text } = Typography;
 
@@ -77,6 +79,7 @@ export const SyncPanel: React.FC = () => {
     'all' | 'added' | 'changed' | 'extra' | 'conflicts'
   >('all');
   const [comparedOnce, setComparedOnce] = useState(false);
+  const [remotePicker, setRemotePicker] = useState<'source' | 'target' | null>(null);
 
   const pick = async (setter: (v: string) => void) => {
     const selected = await open({ directory: true, multiple: false });
@@ -283,9 +286,18 @@ export const SyncPanel: React.FC = () => {
                 <Input
                   value={source}
                   onChange={(e) => setSource(e.target.value)}
-                  placeholder={t('sync.source')}
+                  placeholder={`${t('sync.source')} / remote://…`}
                 />
-                <Button icon={<FolderOpenOutlined />} onClick={() => void pick(setSource)} />
+                <Button
+                  icon={<FolderOpenOutlined />}
+                  title={t('sync.pickLocal')}
+                  onClick={() => void pick(setSource)}
+                />
+                <Button
+                  icon={<CloudServerOutlined />}
+                  title={t('sync.pickRemote')}
+                  onClick={() => setRemotePicker('source')}
+                />
               </Space.Compact>
             </Form.Item>
             <Form.Item label={t('sync.target')} style={{ marginBottom: 12 }}>
@@ -293,9 +305,18 @@ export const SyncPanel: React.FC = () => {
                 <Input
                   value={target}
                   onChange={(e) => setTarget(e.target.value)}
-                  placeholder={t('sync.target')}
+                  placeholder={`${t('sync.target')} / remote://…`}
                 />
-                <Button icon={<FolderOpenOutlined />} onClick={() => void pick(setTarget)} />
+                <Button
+                  icon={<FolderOpenOutlined />}
+                  title={t('sync.pickLocal')}
+                  onClick={() => void pick(setTarget)}
+                />
+                <Button
+                  icon={<CloudServerOutlined />}
+                  title={t('sync.pickRemote')}
+                  onClick={() => setRemotePicker('target')}
+                />
               </Space.Compact>
             </Form.Item>
             <Form.Item label={t('sync.mode')} style={{ marginBottom: 12 }}>
@@ -513,6 +534,16 @@ export const SyncPanel: React.FC = () => {
           )}
         </Card>
       </div>
+
+      <RemoteFolderSelector
+        open={remotePicker !== null}
+        onClose={() => setRemotePicker(null)}
+        onSelect={(path) => {
+          if (remotePicker === 'source') setSource(path);
+          else if (remotePicker === 'target') setTarget(path);
+          setRemotePicker(null);
+        }}
+      />
     </div>
   );
 };

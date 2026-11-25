@@ -22,6 +22,7 @@ import {
   UnorderedListOutlined,
   ApartmentOutlined,
   EnterOutlined,
+  UploadOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
@@ -30,6 +31,7 @@ import {
   useSettingsStore,
   useDualPaneStore,
   useTransferStore,
+  useNavigationStore,
 } from '../../stores';
 import { looksLikeSystemPath, parentPath } from '../../utils/pathNav';
 import { BrowserPane } from './BrowserPane';
@@ -77,7 +79,9 @@ export const DualPaneFileBrowser: React.FC = () => {
     setRightRoot,
   } = useDualPaneStore();
   const { addPath, invalidatePaths } = useFileStore();
-  const { startTransfer } = useTransferStore();
+  const { startTransfer, setPendingDeleteSources } = useTransferStore();
+  const openTransferWith = useNavigationStore((s) => s.openTransferWith);
+  const openMenu = useNavigationStore((s) => s.openMenu);
   const [splitRatio] = useState(50);
 
   const leftCwd = useDualPaneStore((s) => s.leftCwd);
@@ -181,15 +185,38 @@ export const DualPaneFileBrowser: React.FC = () => {
       }
       if (asMove) {
         message.info(t('browser.dualPane.moveRemoteIsCopy'));
+        setPendingDeleteSources(sourcePaths);
+      } else {
+        setPendingDeleteSources(null);
       }
       const check = await runCopyToTarget(sourcePaths, targetPath);
       if (check === 'none') {
-        // Refresh happens when transferring settles (covers conflict modal too).
+        openMenu('tasks');
+        message.info(t('browser.dualPane.transferStarted'));
         await startTransfer('rename');
+        setSelection(activePane, []);
+      } else if (check === 'conflicts') {
+        openMenu('tasks');
       }
     },
-    [activePane, refreshAfterMutation, setSelection, startTransfer, t]
+    [
+      activePane,
+      openMenu,
+      refreshAfterMutation,
+      setPendingDeleteSources,
+      setSelection,
+      startTransfer,
+      t,
+    ]
   );
+
+  const handleSendToTransfer = () => {
+    if (!activeSelection.length) {
+      message.warning(t('browser.dualPane.needSelection'));
+      return;
+    }
+    openTransferWith(activeSelection, otherTarget || undefined);
+  };
 
   const handleCopyToOther = () => {
     if (!otherTarget) {
@@ -340,6 +367,14 @@ export const DualPaneFileBrowser: React.FC = () => {
             onClick={handleMoveToOther}
           >
             {t('browser.dualPane.moveToOther')}
+          </Button>
+          <Button
+            size="small"
+            icon={<UploadOutlined />}
+            disabled={!activeSelection.length}
+            onClick={handleSendToTransfer}
+          >
+            {t('browser.dualPane.sendToTransfer')}
           </Button>
           <Button
             size="small"

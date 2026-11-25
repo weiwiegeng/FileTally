@@ -355,7 +355,7 @@ async fn delete_rel_at_dest(
     dest_is_remote: bool,
     dest_remote: &Option<(String, String)>,
     dest_local: &PathBuf,
-) {
+) -> Result<(), String> {
     if dest_is_remote {
         if let Some((cid, base_rel)) = dest_remote {
             let remote = join_remote_path(
@@ -370,12 +370,13 @@ async fn delete_rel_at_dest(
                     rel
                 ),
             );
-            let _ = delete_remote_path(store, &remote).await;
+            delete_remote_path(store, &remote).await?;
+            return Ok(());
         }
-    } else {
-        let p = dest_local.join(rel);
-        let _ = fs::remove_file(p);
+        return Err(crate::err::code("sync_copy_failed"));
     }
+    let p = dest_local.join(rel);
+    fs::remove_file(&p).map_err(|e| crate::err::with_detail("sync_copy_failed", e))
 }
 
 #[tauri::command]
@@ -475,7 +476,7 @@ pub async fn run_sync(
 
     if delete_extras && mode == "one_way" && !job_runner::is_cancelled(job_id) {
         for extra in &diff.extra {
-            delete_rel_at_dest(
+            if let Err(e) = delete_rel_at_dest(
                 store.as_ref(),
                 &dest,
                 &extra.relative_path,
@@ -483,7 +484,10 @@ pub async fn run_sync(
                 &dest_remote,
                 &dest_local,
             )
-            .await;
+            .await
+            {
+                errors.push(format!("delete {}: {e}", extra.relative_path));
+            }
             current += 1;
             emit_sync_progress(
                 &app,
