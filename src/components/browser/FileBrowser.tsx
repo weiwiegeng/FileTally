@@ -39,6 +39,7 @@ import {
   useTagStore,
 } from '../../stores';
 import { BatchOpsModal } from './BatchOpsModal';
+import { BrowserPlacesBar } from './BrowserPlacesBar';
 import { DualPaneFileBrowser } from './DualPaneFileBrowser';
 import { FileTree } from './FileTree';
 import { FileListView } from './FileListView';
@@ -72,7 +73,7 @@ export const FileBrowser: React.FC = () => {
   } = useFileStore();
   const { settings } = useSettingsStore();
   const { connections } = useRemoteStore();
-  const { favorites, recent, addFavorite, removeFavorite, isFavorite, pushRecent } = usePlacesStore();
+  const { favorites, addFavorite, removeFavorite, isFavorite, pushRecent } = usePlacesStore();
   const colors = useThemeColors();
   const initializedRef = useRef(false);
   const [showRemoteSelector, setShowRemoteSelector] = useState(false);
@@ -337,70 +338,7 @@ export const FileBrowser: React.FC = () => {
         </Space>
       </div>
 
-      {(favorites.length > 0 || recent.length > 0) && (
-        <div
-          style={{
-            padding: '6px 24px',
-            borderBottom: `1px solid ${colors.border}`,
-            display: 'flex',
-            gap: 8,
-            flexWrap: 'wrap',
-            alignItems: 'center',
-          }}
-        >
-          {favorites.slice(0, 8).map((f) => {
-            const tag = getTagForPath(f.path);
-            return (
-              <Tag
-                key={f.id}
-                color="gold"
-                style={{ cursor: 'pointer' }}
-                onClick={() => void addPath(f.path)}
-              >
-                {tag ? (
-                  <span
-                    style={{
-                      display: 'inline-block',
-                      width: 8,
-                      height: 8,
-                      borderRadius: '50%',
-                      background: tag.color,
-                      marginRight: 6,
-                    }}
-                  />
-                ) : (
-                  <StarFilled />
-                )}{' '}
-                {f.label}
-              </Tag>
-            );
-          })}
-          {recent.slice(0, 5).map((r) => {
-            const tag = getTagForPath(r.path);
-            return (
-              <Tag
-                key={r.id}
-                style={{ cursor: 'pointer' }}
-                onClick={() => void addPath(r.path)}
-              >
-                {tag ? (
-                  <span
-                    style={{
-                      display: 'inline-block',
-                      width: 8,
-                      height: 8,
-                      borderRadius: '50%',
-                      background: tag.color,
-                      marginRight: 6,
-                    }}
-                  />
-                ) : null}
-                {r.label}
-              </Tag>
-            );
-          })}
-        </div>
-      )}
+      <BrowserPlacesBar />
 
       {currentPaths.length > 0 && (
         <Tabs

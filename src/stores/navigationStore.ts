@@ -30,6 +30,7 @@ interface NavigationState {
   requestedMenu: NavigationMenu | null;
   pendingBrowser: PendingBrowserOpen | null;
   pendingTransfer: PendingTransferOpen | null;
+  openMenu: (menu: NavigationMenu) => void;
   openBrowserAt: (path?: string, pane?: BrowserPaneSide) => void;
   openTransferWith: (sources: string[], target?: string) => void;
   consumePending: () => {
@@ -43,6 +44,14 @@ export const useNavigationStore = create<NavigationState>((set, get) => ({
   requestedMenu: null,
   pendingBrowser: null,
   pendingTransfer: null,
+
+  openMenu: (menu) => {
+    set({
+      requestedMenu: menu,
+      pendingBrowser: null,
+      pendingTransfer: null,
+    });
+  },
 
   openBrowserAt: (path, pane) => {
     set({

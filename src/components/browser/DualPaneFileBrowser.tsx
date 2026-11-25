@@ -33,6 +33,7 @@ import {
 } from '../../stores';
 import { looksLikeSystemPath } from '../../utils/pathNav';
 import { BrowserPane } from './BrowserPane';
+import { BrowserPlacesBar } from './BrowserPlacesBar';
 import { FilePreview } from './FilePreview';
 import { ConflictModal } from '../transfer/ConflictModal';
 import { useThemeColors } from '../../hooks';
@@ -355,6 +356,8 @@ export const DualPaneFileBrowser: React.FC = () => {
           </Space>
         </Space>
       </div>
+
+      <BrowserPlacesBar />
 
       {activeRoot && (
         <div style={{ padding: '4px 24px' }}>

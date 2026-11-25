@@ -252,13 +252,18 @@ export const Settings: React.FC = () => {
                     value={settings.defaultPage}
                     onChange={(value) => updateSettings({ defaultPage: value })}
                     options={[
-                      { value: 'disk', label: t('menu.diskMonitor') },
                       { value: 'browser', label: t('menu.fileBrowser') },
                       { value: 'filter', label: t('menu.smartSearch') },
-                      { value: 'remote', label: t('menu.remoteConnect') },
                       { value: 'transfer', label: t('menu.fileTransfer') },
+                      { value: 'sync', label: t('menu.sync') },
+                      { value: 'trash', label: t('menu.trash') },
+                      { value: 'organize', label: t('menu.organize') },
+                      { value: 'rules', label: t('menu.rules') },
+                      { value: 'disk', label: t('menu.diskMonitor') },
+                      { value: 'remote', label: t('menu.remoteConnect') },
                       { value: 'excel', label: t('menu.excelCheck') },
                       { value: 'ai', label: t('menu.aiAnalysis') },
+                      { value: 'settings', label: t('menu.settings') },
                     ]}
                   />
                 </Form.Item>

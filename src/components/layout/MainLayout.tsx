@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Layout, Menu, Typography, ConfigProvider, theme } from 'antd';
+import { Layout, Typography, ConfigProvider, theme, Badge, Drawer } from 'antd';
 import zhCNAntd from 'antd/locale/zh_CN';
 import enUSAntd from 'antd/locale/en_US';
 import {
@@ -13,7 +13,7 @@ import {
   FileExcelOutlined,
   UnorderedListOutlined,
   FilterOutlined,
-  RetweetOutlined,
+  AppstoreOutlined,
   SwapOutlined,
   DeleteOutlined,
 } from '@ant-design/icons';
@@ -42,7 +42,7 @@ import {
 import { buildTransferItems, resolveTransferSetup } from '../browser/dualPaneTransfer';
 
 const { Sider, Content } = Layout;
-const { Title } = Typography;
+const { Title, Text } = Typography;
 
 type MenuKey =
   | 'disk'
@@ -59,24 +59,122 @@ type MenuKey =
   | 'trash'
   | 'settings';
 
+const ALL_MENU_KEYS: MenuKey[] = [
+  'disk',
+  'browser',
+  'remote',
+  'filter',
+  'transfer',
+  'excel',
+  'ai',
+  'tasks',
+  'rules',
+  'organize',
+  'sync',
+  'trash',
+  'settings',
+];
+
 const getSystemPrefersDark = () =>
   typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+interface NavItemDef {
+  key: MenuKey;
+  icon: React.ReactNode;
+  label: string;
+}
+
+interface NavSection {
+  label?: string;
+  items: NavItemDef[];
+}
+
+const NavRow: React.FC<{
+  icon: React.ReactNode;
+  label: React.ReactNode;
+  active?: boolean;
+  onClick: () => void;
+  colors: { text: string; textSecondary: string; activeBg: string; activeText: string; hover: string };
+}> = ({ icon, label, active, onClick, colors }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      width: '100%',
+      height: 36,
+      padding: '0 12px',
+      margin: '1px 0',
+      border: 'none',
+      borderRadius: 8,
+      cursor: 'pointer',
+      background: active ? colors.activeBg : 'transparent',
+      color: active ? colors.activeText : colors.text,
+      fontSize: 13,
+      fontWeight: active ? 500 : 400,
+      textAlign: 'left',
+      lineHeight: 1,
+      transition: 'background 0.12s ease, color 0.12s ease',
+    }}
+    onMouseEnter={(e) => {
+      if (!active) e.currentTarget.style.background = colors.hover;
+    }}
+    onMouseLeave={(e) => {
+      if (!active) e.currentTarget.style.background = 'transparent';
+    }}
+  >
+    <span
+      style={{
+        width: 18,
+        display: 'inline-flex',
+        justifyContent: 'center',
+        fontSize: 15,
+        color: active ? colors.activeText : colors.textSecondary,
+        flexShrink: 0,
+      }}
+    >
+      {icon}
+    </span>
+    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      {label}
+    </span>
+  </button>
+);
 
 export const MainLayout: React.FC = () => {
   const { settings } = useSettingsStore();
   const { t, i18n } = useTranslation();
   const [systemDark, setSystemDark] = useState(getSystemPrefersDark);
+  const [tasksDrawerOpen, setTasksDrawerOpen] = useState(false);
 
   const activeTaskCount = useTaskStore((s) =>
-    s.tasks.filter((t) => t.status === 'running' || t.status === 'queued').length
+    s.tasks.filter((task) => task.status === 'running' || task.status === 'queued').length
   );
   const requestedMenu = useNavigationStore((s) => s.requestedMenu);
   const pendingBrowser = useNavigationStore((s) => s.pendingBrowser);
   const pendingTransfer = useNavigationStore((s) => s.pendingTransfer);
   const consumePending = useNavigationStore((s) => s.consumePending);
 
+  const resolveDefaultPage = (page: string): MenuKey => {
+    if (page === 'search') return 'filter';
+    return (ALL_MENU_KEYS as string[]).includes(page) ? (page as MenuKey) : 'browser';
+  };
+
+  const [activeMenu, setActiveMenu] = useState<MenuKey>(() =>
+    resolveDefaultPage(settings.defaultPage)
+  );
+
   useEffect(() => {
     if (!requestedMenu) return;
+
+    if (requestedMenu === 'tasks') {
+      setTasksDrawerOpen(true);
+      consumePending();
+      return;
+    }
+
     setActiveMenu(requestedMenu as MenuKey);
 
     if (requestedMenu === 'browser') {
@@ -103,9 +201,7 @@ export const MainLayout: React.FC = () => {
       const { sources, target } = pendingTransfer;
       void (async () => {
         const items = await buildTransferItems(sources);
-        const setup = target
-          ? resolveTransferSetup(sources, target)
-          : null;
+        const setup = target ? resolveTransferSetup(sources, target) : null;
         transfer.setDirection(setup?.direction ?? transfer.direction);
         transfer.clearSourceItems();
         transfer.addSourceItems(items, setup?.sourceConnectionName);
@@ -118,39 +214,12 @@ export const MainLayout: React.FC = () => {
     consumePending();
   }, [requestedMenu, pendingBrowser, pendingTransfer, settings.dualPaneBrowser, consumePending]);
 
-  const resolveDefaultPage = (page: string): MenuKey => {
-    if (page === 'search') return 'filter';
-    const allowed: MenuKey[] = [
-      'disk',
-      'browser',
-      'remote',
-      'filter',
-      'transfer',
-      'excel',
-      'ai',
-      'tasks',
-      'rules',
-      'organize',
-      'sync',
-      'trash',
-      'settings',
-    ];
-    return (allowed as string[]).includes(page) ? (page as MenuKey) : 'disk';
-  };
-
-  // defaultPage 只影响启动时的初始页，改设置时不强制跳转当前页
-  const [activeMenu, setActiveMenu] = useState<MenuKey>(() =>
-    resolveDefaultPage(settings.defaultPage)
-  );
-
-  // 监听语言设置变化，实时切换
   useEffect(() => {
     if (i18n.language !== settings.language) {
       i18n.changeLanguage(settings.language);
     }
   }, [settings.language, i18n]);
 
-  // system 主题跟随 OS
   useEffect(() => {
     if (settings.theme !== 'system' || typeof window === 'undefined') return;
     const media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -170,55 +239,37 @@ export const MainLayout: React.FC = () => {
 
   const antdLocale = settings.language === 'zh-CN' ? zhCNAntd : enUSAntd;
 
-  const menuItems = [
+  const navSections: NavSection[] = [
     {
-      type: 'group' as const,
-      label: t('menu.groupDaily'),
-      children: [
-        { key: 'disk', icon: <DatabaseOutlined />, label: t('menu.diskMonitor') },
+      label: t('menu.groupWorkspace'),
+      items: [
         { key: 'browser', icon: <FolderOutlined />, label: t('menu.fileBrowser') },
-        { key: 'remote', icon: <CloudServerOutlined />, label: t('menu.remoteConnect') },
-      ],
-    },
-    {
-      type: 'group' as const,
-      label: t('menu.groupFind'),
-      children: [
         { key: 'filter', icon: <SearchOutlined />, label: t('menu.smartSearch') },
-        { key: 'transfer', icon: <UploadOutlined />, label: t('menu.fileTransfer') },
       ],
     },
     {
-      type: 'group' as const,
-      label: t('menu.groupTools'),
-      children: [
-        { key: 'rules', icon: <FilterOutlined />, label: t('menu.rules') },
-        { key: 'organize', icon: <RetweetOutlined />, label: t('menu.organize') },
+      label: t('menu.groupWorkflow'),
+      items: [
+        { key: 'transfer', icon: <UploadOutlined />, label: t('menu.fileTransfer') },
         { key: 'sync', icon: <SwapOutlined />, label: t('menu.sync') },
         { key: 'trash', icon: <DeleteOutlined />, label: t('menu.trash') },
       ],
     },
     {
-      type: 'group' as const,
-      label: t('menu.groupPro'),
-      children: [
+      label: t('menu.groupTools'),
+      items: [
+        { key: 'rules', icon: <FilterOutlined />, label: t('menu.rules') },
+        { key: 'organize', icon: <AppstoreOutlined />, label: t('menu.organize') },
+      ],
+    },
+    {
+      label: t('menu.groupMore'),
+      items: [
+        { key: 'disk', icon: <DatabaseOutlined />, label: t('menu.diskMonitor') },
+        { key: 'remote', icon: <CloudServerOutlined />, label: t('menu.remoteConnect') },
         { key: 'excel', icon: <FileExcelOutlined />, label: t('menu.excelCheck') },
         { key: 'ai', icon: <RobotOutlined />, label: t('menu.aiAnalysis') },
       ],
-    },
-    { type: 'divider' as const },
-    {
-      key: 'tasks',
-      icon: <UnorderedListOutlined />,
-      label:
-        activeTaskCount > 0
-          ? `${t('menu.tasks')} (${activeTaskCount})`
-          : t('menu.tasks'),
-    },
-    {
-      key: 'settings',
-      icon: <SettingOutlined />,
-      label: t('menu.settings'),
     },
   ];
 
@@ -255,32 +306,44 @@ export const MainLayout: React.FC = () => {
     }
   };
 
-  // 根据主题设置背景色（含 system）
   const bgColors = useMemo(() => {
     if (!isDark) {
       return {
         primary: '#ffffff',
         secondary: '#f5f5f5',
-        sider: 'linear-gradient(180deg, #f0f2f5 0%, #e6e8eb 100%)',
-        border: '#d9d9d9',
-        text: '#000000',
-        textSecondary: '#595959',
+        sider: '#f7f8fa',
+        border: '#e8e8e8',
+        text: '#1f1f1f',
+        textSecondary: '#8c8c8c',
+        activeBg: 'rgba(24, 144, 255, 0.12)',
+        activeText: '#1677ff',
+        hover: 'rgba(0, 0, 0, 0.04)',
       };
     }
     return {
       primary: '#0f0f1a',
       secondary: '#1a1a2e',
-      sider: 'linear-gradient(180deg, #1a1a2e 0%, #16213e 100%)',
-      border: '#303050',
-      text: '#ffffff',
+      sider: '#141422',
+      border: '#2a2a40',
+      text: '#f0f0f0',
       textSecondary: '#8c8c8c',
+      activeBg: 'rgba(22, 119, 255, 0.22)',
+      activeText: '#69b1ff',
+      hover: 'rgba(255, 255, 255, 0.06)',
     };
   }, [isDark]);
 
-  // 同步主题到 document 属性（用于 CSS 滚动条等全局样式）
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
   }, [isDark]);
+
+  const navColors = {
+    text: bgColors.text,
+    textSecondary: bgColors.textSecondary,
+    activeBg: bgColors.activeBg,
+    activeText: bgColors.activeText,
+    hover: bgColors.hover,
+  };
 
   return (
     <ConfigProvider
@@ -288,7 +351,7 @@ export const MainLayout: React.FC = () => {
       theme={{
         algorithm: themeAlgorithm,
         token: {
-          colorPrimary: '#1890ff',
+          colorPrimary: '#1677ff',
           colorBgContainer: isDark ? '#1a1a2e' : '#ffffff',
           colorBgElevated: isDark ? '#16213e' : '#f5f5f5',
           colorBorder: bgColors.border,
@@ -299,9 +362,8 @@ export const MainLayout: React.FC = () => {
     >
       <Layout style={{ minHeight: '100vh', background: bgColors.primary }}>
         <TaskBridge />
-        {/* Sidebar */}
         <Sider
-          width={220}
+          width={212}
           style={{
             background: bgColors.sider,
             borderRight: `1px solid ${bgColors.border}`,
@@ -311,11 +373,9 @@ export const MainLayout: React.FC = () => {
             flexDirection: 'column',
           }}
         >
-          {/* Logo */}
           <div
             style={{
-              padding: '20px 16px',
-              borderBottom: `1px solid ${bgColors.border}`,
+              padding: '16px 14px 14px',
               display: 'flex',
               alignItems: 'center',
               gap: 10,
@@ -324,44 +384,118 @@ export const MainLayout: React.FC = () => {
           >
             <div
               style={{
-                width: 36,
-                height: 36,
+                width: 32,
+                height: 32,
                 borderRadius: 8,
-                background: 'linear-gradient(135deg, #1890ff 0%, #722ed1 100%)',
+                background: '#1677ff',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
+                flexShrink: 0,
               }}
             >
-              <FolderOutlined style={{ color: '#fff', fontSize: 18 }} />
+              <FolderOutlined style={{ color: '#fff', fontSize: 16 }} />
             </div>
-            <div>
-              <Title level={5} style={{ margin: 0, color: bgColors.text }}>
+            <div style={{ minWidth: 0 }}>
+              <Title
+                level={5}
+                style={{
+                  margin: 0,
+                  color: bgColors.text,
+                  fontSize: 15,
+                  lineHeight: '20px',
+                  fontWeight: 600,
+                }}
+              >
                 {t('app.name')}
               </Title>
-              <div style={{ fontSize: 10, color: bgColors.textSecondary }}>
+              <Text
+                style={{
+                  fontSize: 11,
+                  color: bgColors.textSecondary,
+                  lineHeight: '14px',
+                  display: 'block',
+                }}
+              >
                 {t('app.tagline')}
-              </div>
+              </Text>
             </div>
           </div>
 
-          {/* Menu */}
-          <div style={{ flex: 1, overflow: 'auto', paddingBottom: 12 }}>
-            <Menu
-              mode="inline"
-              selectedKeys={[activeMenu]}
-              onClick={({ key }) => setActiveMenu(key as MenuKey)}
-              style={{
-                background: 'transparent',
-                border: 'none',
-                marginTop: 4,
-              }}
-              items={menuItems}
+          <div
+            style={{
+              flex: 1,
+              overflow: 'auto',
+              padding: '0 8px 8px',
+            }}
+          >
+            {navSections.map((section, idx) => (
+              <div key={section.label ?? idx} style={{ marginBottom: 10 }}>
+                {section.label ? (
+                  <div
+                    style={{
+                      padding: '8px 12px 4px',
+                      fontSize: 11,
+                      fontWeight: 500,
+                      letterSpacing: '0.02em',
+                      color: bgColors.textSecondary,
+                      userSelect: 'none',
+                    }}
+                  >
+                    {section.label}
+                  </div>
+                ) : null}
+                {section.items.map((item) => (
+                  <NavRow
+                    key={item.key}
+                    icon={item.icon}
+                    label={item.label}
+                    active={activeMenu === item.key}
+                    onClick={() => setActiveMenu(item.key)}
+                    colors={navColors}
+                  />
+                ))}
+              </div>
+            ))}
+          </div>
+
+          <div
+            style={{
+              flexShrink: 0,
+              borderTop: `1px solid ${bgColors.border}`,
+              padding: '8px',
+            }}
+          >
+            <NavRow
+              icon={
+                <Badge count={activeTaskCount} size="small" offset={[2, -1]}>
+                  <UnorderedListOutlined />
+                </Badge>
+              }
+              label={
+                <>
+                  {t('menu.tasks')}
+                  {activeTaskCount > 0 ? (
+                    <Text style={{ marginLeft: 6, fontSize: 12, color: bgColors.textSecondary }}>
+                      {activeTaskCount}
+                    </Text>
+                  ) : null}
+                </>
+              }
+              active={tasksDrawerOpen}
+              onClick={() => setTasksDrawerOpen(true)}
+              colors={navColors}
+            />
+            <NavRow
+              icon={<SettingOutlined />}
+              label={t('menu.settings')}
+              active={activeMenu === 'settings'}
+              onClick={() => setActiveMenu('settings')}
+              colors={navColors}
             />
           </div>
         </Sider>
 
-        {/* Main Content */}
         <Layout style={{ background: bgColors.primary, height: '100vh' }}>
           <Content
             style={{
@@ -373,6 +507,20 @@ export const MainLayout: React.FC = () => {
             {renderContent()}
           </Content>
         </Layout>
+
+        <Drawer
+          title={t('menu.tasks')}
+          placement="right"
+          width={720}
+          open={tasksDrawerOpen}
+          onClose={() => setTasksDrawerOpen(false)}
+          destroyOnClose={false}
+          styles={{ body: { padding: 0, height: '100%' } }}
+        >
+          <div style={{ height: '100%', overflow: 'auto' }}>
+            <TaskCenter />
+          </div>
+        </Drawer>
       </Layout>
     </ConfigProvider>
   );

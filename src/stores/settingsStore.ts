@@ -30,7 +30,19 @@ export interface AIConfig {
   capability: AICapability;
 }
 
-export type DefaultPage = 'disk' | 'browser' | 'filter' | 'remote' | 'transfer' | 'excel' | 'ai' | 'settings';
+export type DefaultPage =
+  | 'disk'
+  | 'browser'
+  | 'filter'
+  | 'remote'
+  | 'transfer'
+  | 'sync'
+  | 'trash'
+  | 'organize'
+  | 'rules'
+  | 'excel'
+  | 'ai'
+  | 'settings';
 
 export interface AppSettings {
   // 通用设置
@@ -77,7 +89,7 @@ const defaultSettings: AppSettings = {
   // 通用设置
   language: 'zh-CN',
   theme: 'dark',
-  defaultPage: 'disk',
+  defaultPage: 'browser',
   
   // 文件浏览设置
   showHiddenFiles: false,
@@ -115,11 +127,24 @@ const defaultSettings: AppSettings = {
 
 const normalizeDefaultPage = (value: string | undefined): DefaultPage => {
   if (value === 'search') return 'filter';
-  const allowed: DefaultPage[] = ['disk', 'browser', 'filter', 'remote', 'transfer', 'excel', 'ai', 'settings'];
+  const allowed: DefaultPage[] = [
+    'disk',
+    'browser',
+    'filter',
+    'remote',
+    'transfer',
+    'sync',
+    'trash',
+    'organize',
+    'rules',
+    'excel',
+    'ai',
+    'settings',
+  ];
   if (value && (allowed as string[]).includes(value)) {
     return value as DefaultPage;
   }
-  return 'disk';
+  return 'browser';
 };
 
 export const useSettingsStore = create<SettingsState>()(
