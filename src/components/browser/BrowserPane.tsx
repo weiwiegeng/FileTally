@@ -217,6 +217,7 @@ export const BrowserPane: React.FC<BrowserPaneProps> = ({
       onMouseDown={onActivate}
       onDragOver={(e) => e.preventDefault()}
       onDrop={handleDrop}
+      onContextMenu={(e) => e.preventDefault()}
     >
       <div
         style={{

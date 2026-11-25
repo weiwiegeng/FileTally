@@ -267,6 +267,28 @@ export const Settings: React.FC = () => {
                     ]}
                   />
                 </Form.Item>
+
+                <Form.Item
+                  label={t('settings.closeToTray')}
+                  extra={t('settings.closeToTrayHint')}
+                >
+                  <Switch
+                    checked={settings.closeToTray !== false}
+                    onChange={(checked) => updateSettings({ closeToTray: checked })}
+                  />
+                </Form.Item>
+
+                <Form.Item
+                  label={t('settings.desktopNotifications')}
+                  extra={t('settings.desktopNotificationsHint')}
+                >
+                  <Switch
+                    checked={settings.desktopNotifications !== false}
+                    onChange={(checked) =>
+                      updateSettings({ desktopNotifications: checked })
+                    }
+                  />
+                </Form.Item>
               </Form>
             </Card>
           </Col>

@@ -110,8 +110,24 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
     }
   };
 
-  // 右键菜单项
+  // 右键菜单项（覆盖 WebView 默认英文 Reload / Inspect）
   const contextMenuItems: MenuProps['items'] = [
+    ...(node.is_dir
+      ? [
+          {
+            key: 'open',
+            label: t('browser.fileTreeNode.contextOpen'),
+            onClick: (e: { domEvent: { stopPropagation: () => void } }) => {
+              e.domEvent.stopPropagation();
+              if (paneCtx) {
+                paneCtx.enterFolder(node.path);
+              } else {
+                void handleExpand();
+              }
+            },
+          },
+        ]
+      : []),
     {
       key: 'rename',
       label: t('browser.fileTreeNode.contextRename'),
@@ -119,6 +135,17 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
       onClick: (e) => {
         e.domEvent.stopPropagation();
         handleStartEdit();
+      },
+    },
+    {
+      key: 'copyPath',
+      label: t('browser.fileTreeNode.contextCopyPath'),
+      onClick: (e) => {
+        e.domEvent.stopPropagation();
+        void navigator.clipboard.writeText(node.path).then(
+          () => message.success(t('browser.fileTreeNode.pathCopied')),
+          () => message.error(t('browser.fileTreeNode.pathCopyFailed'))
+        );
       },
     },
   ];
@@ -181,10 +208,12 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
         menu={{ items: contextMenuItems }}
         trigger={['contextMenu']}
         disabled={isEditing}
+        destroyPopupOnHide
       >
         <div
           onClick={handleClick}
           onDoubleClick={(e) => void handleDoubleClick(e)}
+          onContextMenu={(e) => e.stopPropagation()}
           draggable={Boolean(paneCtx?.enableDrag && paneCtx.selectedPaths.includes(node.path))}
           onDragStart={(e) => {
             if (!paneCtx?.selectedPaths.length) return;

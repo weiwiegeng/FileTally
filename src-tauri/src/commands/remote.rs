@@ -1453,6 +1453,225 @@ pub async fn delete_remote_paths(
     })
 }
 
+/// Create a directory under `parent` (local or `remote://`).
+#[tauri::command]
+pub async fn mkdir_path(
+    store: State<'_, Arc<RemoteSessionStore>>,
+    parent: String,
+    name: String,
+) -> Result<String, String> {
+    path_util::validate_user_path(&parent)?;
+    let name = path_util::validate_file_name(&name)?.to_string();
+
+    if path_util::is_remote_path(&parent) {
+        let (conn_id, rel) = parse_remote_path(&parent)?;
+        let new_rel = if rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel}/{name}")
+        };
+        let mut guard = store.inner.lock().await;
+        match guard.get_mut(&conn_id) {
+            Some(RemoteSession::Smb(session)) => {
+                ensure_remote_dirs(session, &new_rel).await?;
+            }
+            Some(RemoteSession::Sftp(session)) => {
+                super::remote_sftp::sftp_mkdir_rel(session, &new_rel)?;
+            }
+            Some(RemoteSession::WebDav {
+                inner,
+                username,
+                password,
+            }) => {
+                super::remote_webdav::webdav_ensure_dirs(inner, &new_rel, username, password)
+                    .await?;
+            }
+            None => return Err(session_missing()),
+        }
+        let created = join_remote_path(&conn_id, &new_rel);
+        invalidate_remote_list_cache_many(&[parent, created.clone()]);
+        return Ok(created);
+    }
+
+    let parent_path = Path::new(&parent);
+    if !parent_path.is_dir() {
+        return Err(err::code("mkdir_parent_missing"));
+    }
+    let dest = parent_path.join(&name);
+    if dest.exists() {
+        return Err(err::code("mkdir_target_exists"));
+    }
+    std::fs::create_dir(&dest).map_err(|e| err::with_detail("mkdir_failed", e))?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+/// Rename a file/folder (local or `remote://`) within the same parent.
+pub async fn rename_remote_path(
+    store: &RemoteSessionStore,
+    old_path: &str,
+    new_name: &str,
+) -> Result<(String, String), String> {
+    path_util::validate_user_path(old_path)?;
+    let new_name = path_util::validate_file_name(new_name)?.to_string();
+    let (conn_id, rel) = parse_remote_path(old_path)?;
+    if rel.is_empty() {
+        return Err(err::code("rename_no_parent"));
+    }
+    let (parent_rel, _) = match rel.rsplit_once('/') {
+        Some((p, n)) => (p, n),
+        None => ("", rel.as_str()),
+    };
+    let new_rel = if parent_rel.is_empty() {
+        new_name.clone()
+    } else {
+        format!("{parent_rel}/{new_name}")
+    };
+    if new_rel == rel {
+        return Ok((join_remote_path(&conn_id, &rel), new_name));
+    }
+
+    let mut guard = store.inner.lock().await;
+    match guard.get_mut(&conn_id) {
+        Some(RemoteSession::Smb(session)) => {
+            if session
+                .client
+                .stat(&mut session.share, &new_rel)
+                .await
+                .is_ok()
+            {
+                return Err(err::code("rename_target_exists"));
+            }
+            session
+                .client
+                .rename(&session.share, &rel, &new_rel)
+                .await
+                .map_err(map_smb_err)?;
+        }
+        Some(RemoteSession::Sftp(session)) => {
+            if super::remote_sftp::sftp_path_exists(session, &new_rel) {
+                return Err(err::code("rename_target_exists"));
+            }
+            super::remote_sftp::sftp_rename_rel(session, &rel, &new_rel)?;
+        }
+        Some(RemoteSession::WebDav {
+            inner,
+            username,
+            password,
+        }) => {
+            let (exists, _) =
+                super::remote_webdav::webdav_stat(inner, &new_rel, username, password).await?;
+            if exists {
+                return Err(err::code("rename_target_exists"));
+            }
+            super::remote_webdav::webdav_move(inner, &rel, &new_rel, username, password).await?;
+        }
+        None => return Err(session_missing()),
+    }
+    let new_path = join_remote_path(&conn_id, &new_rel);
+    drop(guard);
+    invalidate_remote_list_cache_many(&[old_path.to_string(), new_path.clone()]);
+    Ok((new_path, new_name))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathSpaceInfo {
+    pub available: bool,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub used_bytes: u64,
+}
+
+fn local_space_for_path(path: &str) -> PathSpaceInfo {
+    use sysinfo::Disks;
+    let disks = Disks::new_with_refreshed_list();
+    let target = Path::new(path);
+    let mut best: Option<(usize, &sysinfo::Disk)> = None;
+    for disk in disks.iter() {
+        let mount = disk.mount_point();
+        if target.starts_with(mount) {
+            let len = mount.as_os_str().len();
+            if best.map(|(l, _)| len > l).unwrap_or(true) {
+                best = Some((len, disk));
+            }
+        }
+    }
+    if let Some((_, disk)) = best {
+        let total = disk.total_space();
+        let free = disk.available_space();
+        return PathSpaceInfo {
+            available: total > 0,
+            total_bytes: total,
+            free_bytes: free,
+            used_bytes: total.saturating_sub(free),
+        };
+    }
+    PathSpaceInfo {
+        available: false,
+        total_bytes: 0,
+        free_bytes: 0,
+        used_bytes: 0,
+    }
+}
+
+/// Free/total space for a local path or connected SMB `remote://` root.
+#[tauri::command]
+pub async fn path_space_info(
+    store: State<'_, Arc<RemoteSessionStore>>,
+    path: String,
+) -> Result<PathSpaceInfo, String> {
+    if path.trim().is_empty() {
+        return Ok(PathSpaceInfo {
+            available: false,
+            total_bytes: 0,
+            free_bytes: 0,
+            used_bytes: 0,
+        });
+    }
+
+    if path_util::is_remote_path(&path) {
+        let (conn_id, _) = parse_remote_path(&path)?;
+        let mut guard = store.inner.lock().await;
+        return match guard.get_mut(&conn_id) {
+            Some(RemoteSession::Smb(session)) => {
+                match session.client.fs_info(&mut session.share).await {
+                    Ok(info) => {
+                        let total = info.total_bytes;
+                        let free = info.free_bytes;
+                        Ok(PathSpaceInfo {
+                            available: total > 0,
+                            total_bytes: total,
+                            free_bytes: free,
+                            used_bytes: total.saturating_sub(free),
+                        })
+                    }
+                    Err(_) => Ok(PathSpaceInfo {
+                        available: false,
+                        total_bytes: 0,
+                        free_bytes: 0,
+                        used_bytes: 0,
+                    }),
+                }
+            }
+            Some(_) => Ok(PathSpaceInfo {
+                available: false,
+                total_bytes: 0,
+                free_bytes: 0,
+                used_bytes: 0,
+            }),
+            None => Ok(PathSpaceInfo {
+                available: false,
+                total_bytes: 0,
+                free_bytes: 0,
+                used_bytes: 0,
+            }),
+        };
+    }
+
+    path_util::validate_user_path(&path)?;
+    Ok(local_space_for_path(&path))
+}
+
 fn unique_local_name(path: &Path) -> PathBuf {
     let stem = path
         .file_stem()

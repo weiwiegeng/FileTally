@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { Modal, notification } from 'antd';
 import { useTranslation } from 'react-i18next';
 import {
@@ -10,7 +11,9 @@ import {
   useSettingsStore,
   useDualPaneStore,
   useRemoteStore,
+  useNavigationStore,
 } from '../stores';
+import { bindNotificationActions } from '../utils/systemNotify';
 
 function connectionIdFromRemotePath(path: string): string | null {
   if (!path.startsWith('remote://')) return null;
@@ -24,13 +27,43 @@ export const BootstrapEffects: React.FC = () => {
   const { t } = useTranslation();
 
   useEffect(() => {
-    const { transferBandwidthMBps, transferConcurrency } =
+    const { transferBandwidthMBps, transferConcurrency, closeToTray } =
       useSettingsStore.getState().settings;
     const bytesPerSec = Math.round((transferBandwidthMBps || 0) * 1024 * 1024);
     void invoke('set_transfer_bandwidth_limit', { bytesPerSec }).catch(() => undefined);
     void invoke('set_transfer_concurrency', {
       max: Math.max(1, transferConcurrency || 1),
     }).catch(() => undefined);
+    void invoke('set_close_to_tray', { enabled: closeToTray !== false }).catch(() => undefined);
+    void bindNotificationActions();
+  }, []);
+
+  useEffect(() => {
+    const enabled = useSettingsStore.getState().settings.closeToTray !== false;
+    void invoke('set_close_to_tray', { enabled }).catch(() => undefined);
+    const unsub = useSettingsStore.subscribe((state, prev) => {
+      if (state.settings.closeToTray !== prev.settings.closeToTray) {
+        void invoke('set_close_to_tray', {
+          enabled: state.settings.closeToTray !== false,
+        }).catch(() => undefined);
+      }
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen('tray-open-tasks', () => {
+      useNavigationStore.getState().openMenu('tasks');
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {

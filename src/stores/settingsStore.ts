@@ -58,7 +58,11 @@ export interface AppSettings {
   previewPanelPosition: 'right' | 'bottom';
   /** Side-by-side local/remote panes in file browser */
   dualPaneBrowser: boolean;
-  
+  /** Hide to tray instead of quitting when the window is closed */
+  closeToTray: boolean;
+  /** OS notifications when transfer/sync finishes */
+  desktopNotifications: boolean;
+
   // 搜索设置
   defaultSearchContent: boolean;
   defaultSearchFilename: boolean;
@@ -100,7 +104,9 @@ const defaultSettings: AppSettings = {
   sortOrder: 'asc',
   previewPanelPosition: 'right',
   dualPaneBrowser: true,
-  
+  closeToTray: true,
+  desktopNotifications: true,
+
   // 搜索设置
   defaultSearchContent: true,
   defaultSearchFilename: true,

@@ -498,17 +498,29 @@ pub struct RenameResult {
     pub error: Option<String>,
 }
 
-/// 重命名文件或文件夹
+/// 重命名文件或文件夹（本地或 remote://）
 #[tauri::command]
-pub fn rename_file(old_path: String, new_name: String) -> Result<RenameResult, String> {
+pub async fn rename_file(
+    store: tauri::State<'_, std::sync::Arc<super::remote::RemoteSessionStore>>,
+    old_path: String,
+    new_name: String,
+) -> Result<RenameResult, String> {
     crate::path_util::validate_user_path(&old_path)?;
     if crate::path_util::is_remote_path(&old_path) {
-        return Ok(RenameResult {
-            success: false,
-            new_path: String::new(),
-            new_name: String::new(),
-            error: Some(crate::err::code("rename_remote_unsupported")),
-        });
+        return match super::remote::rename_remote_path(store.as_ref(), &old_path, &new_name).await {
+            Ok((new_path, name)) => Ok(RenameResult {
+                success: true,
+                new_path,
+                new_name: name,
+                error: None,
+            }),
+            Err(e) => Ok(RenameResult {
+                success: false,
+                new_path: String::new(),
+                new_name: String::new(),
+                error: Some(e),
+            }),
+        };
     }
     let old_path = Path::new(&old_path);
     

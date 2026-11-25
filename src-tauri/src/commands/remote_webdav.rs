@@ -482,3 +482,40 @@ pub async fn walk_webdav_files(
     }
     Ok(())
 }
+
+pub async fn webdav_move(
+    session: &WebDavSession,
+    from_rel: &str,
+    to_rel: &str,
+    username: &str,
+    password: &str,
+) -> Result<(), String> {
+    let from_rel = from_rel.trim_matches('/');
+    let to_rel = to_rel.trim_matches('/');
+    if from_rel.is_empty() || to_rel.is_empty() {
+        return Err(err::code("rename_no_parent"));
+    }
+    let from_url = format!("{}{from_rel}", session.base_url);
+    let to_url = format!("{}{to_rel}", session.base_url);
+    let resp = session
+        .client
+        .request(reqwest::Method::from_bytes(b"MOVE").unwrap(), &from_url)
+        .header("Destination", &to_url)
+        .header("Overwrite", "F")
+        .basic_auth(username, Some(password))
+        .send()
+        .await
+        .map_err(|e| err::with_detail("rename_failed", e))?;
+    if resp.status().is_success()
+        || resp.status() == StatusCode::CREATED
+        || resp.status() == StatusCode::NO_CONTENT
+    {
+        return Ok(());
+    }
+    if resp.status() == StatusCode::PRECONDITION_FAILED
+        || resp.status() == StatusCode::CONFLICT
+    {
+        return Err(err::code("rename_target_exists"));
+    }
+    Err(err::with_detail("rename_failed", resp.status()))
+}

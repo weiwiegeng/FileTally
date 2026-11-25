@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import i18n from '../i18n';
 import { cancelJob } from '../utils/jobs';
+import { notifyTaskDone } from '../utils/systemNotify';
 
 export type TaskKind = 'search' | 'transfer' | 'excel' | 'analysis' | 'sync' | 'rules' | 'organize' | 'index';
 export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -129,6 +131,7 @@ export const useTaskStore = create<TaskState>()(
       },
 
       completeTask: (id, status = 'completed', error, retryPayload) => {
+        const prev = get().tasks.find((t) => t.id === id);
         set((state) => ({
           tasks: state.tasks.map((t) =>
             t.id === id
@@ -146,6 +149,25 @@ export const useTaskStore = create<TaskState>()(
               : t
           ),
         }));
+        if (
+          prev &&
+          (prev.status === 'running' || prev.status === 'queued') &&
+          (prev.kind === 'transfer' || prev.kind === 'sync') &&
+          (status === 'completed' || status === 'failed')
+        ) {
+          const kindLabel =
+            prev.kind === 'sync'
+              ? i18n.t('tasks.kind.sync')
+              : i18n.t('tasks.kind.transfer');
+          void notifyTaskDone({
+            title:
+              status === 'completed'
+                ? i18n.t('tasks.notifyDoneTitle', { kind: kindLabel })
+                : i18n.t('tasks.notifyFailTitle', { kind: kindLabel }),
+            body: error || prev.title,
+            openTasks: true,
+          });
+        }
       },
 
       cancelTask: async (id) => {

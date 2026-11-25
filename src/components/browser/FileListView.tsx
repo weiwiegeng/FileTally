@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Breadcrumb, Input, Table } from 'antd';
+import { Breadcrumb, Dropdown, Input, Table, message } from 'antd';
+import type { MenuProps } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { useFileStore } from '../../stores';
 import type { FileNode } from '../../types';
@@ -38,6 +39,11 @@ export const FileListView: React.FC<FileListViewProps> = ({ rootPath, listPath: 
   const [filter, setFilter] = useState('');
   const [rows, setRows] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(false);
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    row: FileNode;
+  } | null>(null);
 
   const useShallowList = Boolean(paneCtx) || listPathProp !== undefined;
   const effectiveListPath =
@@ -124,8 +130,35 @@ export const FileListView: React.FC<FileListViewProps> = ({ rootPath, listPath: 
     return parts;
   }, [paneCtx, rootPath, effectiveListPath]);
 
+  const ctxItems: MenuProps['items'] = ctxMenu
+    ? [
+        ...(ctxMenu.row.is_dir && paneCtx
+          ? [
+              {
+                key: 'open',
+                label: t('browser.fileTreeNode.contextOpen'),
+                onClick: () => paneCtx.enterFolder(ctxMenu.row.path),
+              },
+            ]
+          : []),
+        {
+          key: 'copyPath',
+          label: t('browser.fileTreeNode.contextCopyPath'),
+          onClick: () => {
+            void navigator.clipboard.writeText(ctxMenu.row.path).then(
+              () => message.success(t('browser.fileTreeNode.pathCopied')),
+              () => message.error(t('browser.fileTreeNode.pathCopyFailed'))
+            );
+          },
+        },
+      ]
+    : [];
+
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+    <div
+      style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
       {paneCtx && crumbs.length > 1 ? (
         <Breadcrumb
           style={{ marginBottom: 8, fontSize: 12 }}
@@ -184,6 +217,11 @@ export const FileListView: React.FC<FileListViewProps> = ({ rootPath, listPath: 
                 paneCtx.enterFolder(r.path);
               }
             },
+            onContextMenu: (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setCtxMenu({ x: e.clientX, y: e.clientY, row: r });
+            },
             draggable: Boolean(paneCtx?.enableDrag && paneCtx.selectedPaths.includes(r.path)),
             onDragStart: (e: React.DragEvent) => {
               if (!paneCtx?.selectedPaths.length) return;
@@ -218,6 +256,29 @@ export const FileListView: React.FC<FileListViewProps> = ({ rootPath, listPath: 
           ]}
         />
       </div>
+
+      <Dropdown
+        open={Boolean(ctxMenu)}
+        menu={{
+          items: ctxItems,
+          onClick: () => setCtxMenu(null),
+        }}
+        trigger={['contextMenu']}
+        onOpenChange={(open) => {
+          if (!open) setCtxMenu(null);
+        }}
+      >
+        <div
+          style={{
+            position: 'fixed',
+            left: ctxMenu?.x ?? 0,
+            top: ctxMenu?.y ?? 0,
+            width: 1,
+            height: 1,
+            pointerEvents: 'none',
+          }}
+        />
+      </Dropdown>
     </div>
   );
 };

@@ -316,6 +316,29 @@ pub fn sftp_unlink(session: &SftpSession, rel: &str) -> Result<(), String> {
     })
 }
 
+pub fn sftp_mkdir_rel(session: &SftpSession, rel: &str) -> Result<(), String> {
+    let rel = rel.trim_matches('/');
+    if rel.is_empty() {
+        return Err(err::code("mkdir_invalid_name"));
+    }
+    sftp_ensure_rel_dirs(session, rel)
+}
+
+pub fn sftp_rename_rel(session: &SftpSession, from_rel: &str, to_rel: &str) -> Result<(), String> {
+    let from_rel = from_rel.trim_matches('/');
+    let to_rel = to_rel.trim_matches('/');
+    if from_rel.is_empty() || to_rel.is_empty() {
+        return Err(err::code("rename_no_parent"));
+    }
+    let from = remote_path(session, from_rel);
+    let to = remote_path(session, to_rel);
+    with_sftp(session, |sftp| {
+        sftp.rename(Path::new(&from), Path::new(&to), None)
+            .map_err(|e| err::with_detail("rename_failed", e))?;
+        Ok(())
+    })
+}
+
 pub fn sftp_stat_is_dir(session: &SftpSession, rel: &str) -> Result<bool, String> {
     let path = remote_path(session, rel);
     with_sftp(session, |sftp| {
