@@ -5,6 +5,8 @@ import {
   Button,
   Input,
   Switch,
+  Select,
+  InputNumber,
   Table,
   message,
   Card,
@@ -14,12 +16,16 @@ import {
   Row,
   Col,
   Statistic,
+  Alert,
+  List,
 } from 'antd';
 import {
   SwapOutlined,
   FolderOpenOutlined,
   DiffOutlined,
   CloudSyncOutlined,
+  SaveOutlined,
+  DeleteOutlined,
 } from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
@@ -27,7 +33,13 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
 import { useThemeColors } from '../../hooks';
 import { mapBackendError } from '../../utils/backendError';
-import { makeTaskId, useTaskStore } from '../../stores/taskStore';
+import {
+  makeTaskId,
+  useSyncPresetsStore,
+  useTaskStore,
+  type SyncConflictResolution,
+  type SyncMode,
+} from '../../stores';
 import { formatSize } from '../../utils/format';
 
 const { Title, Text } = Typography;
@@ -35,25 +47,35 @@ const { Title, Text } = Typography;
 interface SyncFileEntry {
   relativePath: string;
   size: number;
-  mtime: number;
+  modified: number;
 }
 
 interface SyncCompareResult {
   added: SyncFileEntry[];
   changed: SyncFileEntry[];
   extra: SyncFileEntry[];
+  conflicts: SyncFileEntry[];
+  mode: string;
 }
 
 export const SyncPanel: React.FC = () => {
   const { t } = useTranslation();
   const colors = useThemeColors();
   const { upsertTask, completeTask, updateProgress } = useTaskStore();
+  const { presets, addPreset, removePreset, updatePreset } = useSyncPresetsStore();
   const [source, setSource] = useState('');
   const [target, setTarget] = useState('');
+  const [presetName, setPresetName] = useState('');
   const [deleteExtra, setDeleteExtra] = useState(false);
+  const [syncMode, setSyncMode] = useState<SyncMode>('one_way');
+  const [conflictResolution, setConflictResolution] =
+    useState<SyncConflictResolution>('skip');
+  const [intervalMinutes, setIntervalMinutes] = useState(0);
   const [diff, setDiff] = useState<SyncCompareResult | null>(null);
   const [loading, setLoading] = useState(false);
-  const [kindFilter, setKindFilter] = useState<'all' | 'added' | 'changed' | 'extra'>('all');
+  const [kindFilter, setKindFilter] = useState<
+    'all' | 'added' | 'changed' | 'extra' | 'conflicts'
+  >('all');
   const [comparedOnce, setComparedOnce] = useState(false);
 
   useEffect(() => {
@@ -95,6 +117,39 @@ export const SyncPanel: React.FC = () => {
     if (typeof selected === 'string') setter(selected);
   };
 
+  const savePreset = () => {
+    if (!source.trim() || !target.trim()) {
+      message.warning(t('sync.presetNeedPaths'));
+      return;
+    }
+    if (!presetName.trim()) {
+      message.warning(t('sync.presetName'));
+      return;
+    }
+    addPreset(
+      presetName,
+      source,
+      target,
+      syncMode,
+      conflictResolution,
+      intervalMinutes,
+      deleteExtra
+    );
+    setPresetName('');
+    message.success(t('sync.presetSaved'));
+  };
+
+  const loadPreset = (preset: (typeof presets)[number]) => {
+    setSource(preset.source);
+    setTarget(preset.dest);
+    setSyncMode(preset.mode || 'one_way');
+    setConflictResolution(preset.conflictResolution || 'skip');
+    setIntervalMinutes(preset.intervalMinutes || 0);
+    setDeleteExtra(preset.deleteExtras ?? false);
+    setDiff(null);
+    setComparedOnce(false);
+  };
+
   const compare = async () => {
     if (!source || !target) {
       message.warning(`${t('sync.source')} / ${t('sync.target')}`);
@@ -102,7 +157,11 @@ export const SyncPanel: React.FC = () => {
     }
     setLoading(true);
     try {
-      const result = await invoke<SyncCompareResult>('compare_sync', { source, dest: target });
+      const result = await invoke<SyncCompareResult>('compare_sync', {
+        source,
+        dest: target,
+        mode: syncMode,
+      });
       setDiff(result);
       setComparedOnce(true);
       setKindFilter('all');
@@ -121,7 +180,7 @@ export const SyncPanel: React.FC = () => {
     setLoading(true);
     let taskId = '';
     try {
-      const jobId = await invoke<number>('prepare_sync');
+      const jobId = await (await import('../../utils/jobs')).prepareJob('sync');
       taskId = makeTaskId('sync', jobId);
       upsertTask({
         id: taskId,
@@ -138,13 +197,32 @@ export const SyncPanel: React.FC = () => {
         dest: target,
         deleteExtras: deleteExtra,
         jobId,
+        mode: syncMode,
+        conflictResolution,
       });
       setDiff(result);
       completeTask(taskId, 'completed');
       message.success(t('sync.done'));
+      const match = presets.find((p) => p.source === source && p.dest === target);
+      if (match) {
+        updatePreset(match.id, {
+          lastRunAt: Date.now(),
+          lastRunOk: true,
+          lastError: undefined,
+        });
+      }
     } catch (e) {
-      if (taskId) completeTask(taskId, 'failed', mapBackendError(e));
-      message.error(mapBackendError(e));
+      const errText = mapBackendError(e);
+      if (taskId) completeTask(taskId, 'failed', errText);
+      message.error(errText);
+      const match = presets.find((p) => p.source === source && p.dest === target);
+      if (match) {
+        updatePreset(match.id, {
+          lastRunAt: Date.now(),
+          lastRunOk: false,
+          lastError: errText,
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -155,6 +233,11 @@ export const SyncPanel: React.FC = () => {
       ...(diff?.added || []).map((x) => ({ ...x, kind: t('sync.added'), kindKey: 'added' as const })),
       ...(diff?.changed || []).map((x) => ({ ...x, kind: t('sync.changed'), kindKey: 'changed' as const })),
       ...(diff?.extra || []).map((x) => ({ ...x, kind: t('sync.extra'), kindKey: 'extra' as const })),
+      ...(diff?.conflicts || []).map((x) => ({
+        ...x,
+        kind: t('sync.conflicts'),
+        kindKey: 'conflicts' as const,
+      })),
     ];
     if (kindFilter === 'all') return all;
     return all.filter((r) => r.kindKey === kindFilter);
@@ -163,6 +246,7 @@ export const SyncPanel: React.FC = () => {
   const kindColor = (key: string) => {
     if (key === 'added') return 'green';
     if (key === 'changed') return 'gold';
+    if (key === 'conflicts') return 'purple';
     return 'red';
   };
 
@@ -215,6 +299,8 @@ export const SyncPanel: React.FC = () => {
           overflow: 'hidden',
         }}
       >
+        <Alert type="info" showIcon message={t('sync.boundaryAlert')} style={{ flexShrink: 0 }} />
+
         <Card
           size="small"
           style={{ background: colors.bgCard, borderColor: colors.border, flexShrink: 0 }}
@@ -241,14 +327,115 @@ export const SyncPanel: React.FC = () => {
                 <Button icon={<FolderOpenOutlined />} onClick={() => void pick(setTarget)} />
               </Space.Compact>
             </Form.Item>
-            <Form.Item style={{ marginBottom: 0 }}>
+            <Form.Item label={t('sync.mode')} style={{ marginBottom: 12 }}>
+              <Select
+                value={syncMode}
+                onChange={setSyncMode}
+                options={[
+                  { value: 'one_way', label: t('sync.modeOneWay') },
+                  { value: 'two_way', label: t('sync.modeTwoWay') },
+                ]}
+              />
+            </Form.Item>
+            {syncMode === 'two_way' && (
+              <Form.Item label={t('sync.conflictStrategy')} style={{ marginBottom: 12 }}>
+                <Select
+                  value={conflictResolution}
+                  onChange={setConflictResolution}
+                  options={[
+                    { value: 'skip', label: t('sync.conflictSkip') },
+                    { value: 'prefer_source', label: t('sync.conflictPreferSource') },
+                    { value: 'prefer_dest', label: t('sync.conflictPreferDest') },
+                  ]}
+                />
+              </Form.Item>
+            )}
+            <Form.Item style={{ marginBottom: 12 }}>
               <Space>
-                <Switch checked={deleteExtra} onChange={setDeleteExtra} />
+                <Switch checked={deleteExtra} onChange={setDeleteExtra} disabled={syncMode === 'two_way'} />
                 <Text>{t('sync.deleteExtra')}</Text>
               </Space>
             </Form.Item>
+            <Form.Item label={t('sync.intervalMinutes')} style={{ marginBottom: 12 }}>
+              <InputNumber min={0} value={intervalMinutes} onChange={(v) => setIntervalMinutes(v || 0)} />
+            </Form.Item>
+            <Form.Item label={t('sync.savePreset')} style={{ marginBottom: 0 }}>
+              <Space.Compact style={{ width: '100%' }}>
+                <Input
+                  value={presetName}
+                  onChange={(e) => setPresetName(e.target.value)}
+                  placeholder={t('sync.presetName')}
+                />
+                <Button icon={<SaveOutlined />} onClick={savePreset}>
+                  {t('sync.savePreset')}
+                </Button>
+              </Space.Compact>
+            </Form.Item>
           </Form>
         </Card>
+
+        {presets.length > 0 && (
+          <Card
+            size="small"
+            title={t('sync.presets')}
+            style={{ background: colors.bgCard, borderColor: colors.border, flexShrink: 0 }}
+            styles={{ body: { padding: '8px 16px' } }}
+          >
+            <List
+              size="small"
+              dataSource={presets}
+              renderItem={(item) => (
+                <List.Item
+                  actions={[
+                    <Button
+                      key="load"
+                      type="link"
+                      size="small"
+                      onClick={() => loadPreset(item)}
+                    >
+                      {t('sync.loadPreset')}
+                    </Button>,
+                    <Button
+                      key="del"
+                      type="link"
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onClick={() => removePreset(item.id)}
+                    >
+                      {t('sync.deletePreset')}
+                    </Button>,
+                  ]}
+                >
+                  <List.Item.Meta
+                    title={item.name}
+                    description={
+                      <>
+                        <div>{`${item.source} → ${item.dest}`}</div>
+                        {item.lastRunAt ? (
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            {item.lastRunOk
+                              ? t('sync.presetLastRunOk', {
+                                  time: new Date(item.lastRunAt).toLocaleString(),
+                                })
+                              : t('sync.presetLastRunFail', {
+                                  time: new Date(item.lastRunAt).toLocaleString(),
+                                  error: item.lastError || '—',
+                                })}
+                          </Text>
+                        ) : (
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            {t('sync.presetNeverRun')}
+                          </Text>
+                        )}
+                      </>
+                    }
+                  />
+                </List.Item>
+              )}
+            />
+          </Card>
+        )}
 
         <Card
           size="small"
@@ -291,20 +478,23 @@ export const SyncPanel: React.FC = () => {
           ) : (
             <>
               <Row gutter={16} style={{ padding: '12px 16px', borderBottom: `1px solid ${colors.border}` }}>
-                <Col span={8}>
+                <Col span={6}>
                   <Statistic title={t('sync.added')} value={diff?.added.length || 0} />
                 </Col>
-                <Col span={8}>
+                <Col span={6}>
                   <Statistic title={t('sync.changed')} value={diff?.changed.length || 0} />
                 </Col>
-                <Col span={8}>
+                <Col span={6}>
                   <Statistic title={t('sync.extra')} value={diff?.extra.length || 0} />
+                </Col>
+                <Col span={6}>
+                  <Statistic title={t('sync.conflicts')} value={diff?.conflicts.length || 0} />
                 </Col>
               </Row>
               <div style={{ padding: '8px 16px', borderBottom: `1px solid ${colors.border}` }}>
                 <Space wrap>
                   <Text type="secondary">{t('sync.filterKind')}</Text>
-                  {(['all', 'added', 'changed', 'extra'] as const).map((k) => (
+                  {(['all', 'added', 'changed', 'extra', 'conflicts'] as const).map((k) => (
                     <Tag
                       key={k}
                       color={kindFilter === k ? 'blue' : 'default'}

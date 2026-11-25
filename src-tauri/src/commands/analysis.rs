@@ -2,41 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 use tauri::{AppHandle, Emitter};
-
-static ANALYSIS_JOB_ID: AtomicU64 = AtomicU64::new(0);
-static ANALYSIS_CANCEL_ID: AtomicU64 = AtomicU64::new(0);
-
-fn begin_analysis_job() -> u64 {
-    ANALYSIS_JOB_ID.fetch_add(1, Ordering::SeqCst) + 1
-}
-
-#[tauri::command]
-pub fn prepare_analysis() -> Result<u64, String> {
-    Ok(begin_analysis_job())
-}
-
-#[tauri::command]
-pub fn cancel_analysis(job_id: Option<u64>) -> Result<(), String> {
-    let id = job_id
-        .filter(|v| *v > 0)
-        .unwrap_or_else(|| ANALYSIS_JOB_ID.load(Ordering::SeqCst));
-    if id > 0 {
-        ANALYSIS_CANCEL_ID.store(id, Ordering::SeqCst);
-    }
-    Ok(())
-}
-
-fn is_analysis_cancelled(job_id: u64) -> bool {
-    ANALYSIS_CANCEL_ID.load(Ordering::SeqCst) == job_id
-}
-
-fn clear_analysis_cancel(job_id: u64) {
-    let _ = ANALYSIS_CANCEL_ID.compare_exchange(job_id, 0, Ordering::SeqCst, Ordering::SeqCst);
-}
 
 /// 进度事件结构
 #[derive(Debug, Clone, Serialize)]
@@ -195,11 +163,8 @@ pub async fn analyze_folder(
     old_file_days: u64,
     job_id: Option<u64>,
 ) -> Result<FolderAnalysisResult, String> {
-    let job_id = match job_id {
-        Some(id) if id > 0 => id,
-        _ => begin_analysis_job(),
-    };
-    clear_analysis_cancel(job_id);
+    let job_id = crate::job_runner::resolve_or_begin(job_id, crate::job_runner::JobKind::Analysis);
+    crate::job_runner::clear_cancel(job_id);
 
     if crate::path_util::is_remote_path(&path) {
         let result = analyze_remote_folder(store.as_ref(), path, large_file_threshold_mb).await;
@@ -207,7 +172,7 @@ pub async fn analyze_folder(
             "analysis-progress",
             AnalysisProgress {
                 job_id,
-                stage: if is_analysis_cancelled(job_id) {
+                stage: if crate::job_runner::is_cancelled(job_id) {
                     "cancelled".into()
                 } else {
                     "complete".into()
@@ -217,6 +182,7 @@ pub async fn analyze_folder(
                 message: String::new(),
             },
         );
+        crate::job_runner::end_job(job_id);
         return result;
     }
 
@@ -378,7 +344,7 @@ fn analyze_folder_sync(
             break;
         }
         
-        if is_analysis_cancelled(job_id) {
+        if crate::job_runner::is_cancelled(job_id) {
             let _ = app.emit(
                 "analysis-progress",
                 AnalysisProgress {
@@ -389,6 +355,7 @@ fn analyze_folder_sync(
                     message: String::new(),
                 },
             );
+            crate::job_runner::end_job(job_id);
             return Err(crate::err::code("analysis_cancelled"));
         }
 
@@ -533,6 +500,7 @@ fn analyze_folder_sync(
         message: String::new(),
     });
 
+    crate::job_runner::end_job(job_id);
     Ok(FolderAnalysisResult {
         path,
         total_files,

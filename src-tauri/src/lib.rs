@@ -1,30 +1,29 @@
 mod commands;
 mod err;
+mod job_runner;
 mod models;
 mod path_util;
 
 use std::sync::Arc;
 
 use commands::{
-    analyze_folder, apply_batch_ops, apply_organize, cancel_analysis, cancel_excel_check,
-    cancel_rule_filter, cancel_search, cancel_sync, cancel_transfer, check_folder_integrity,
+    analyze_folder, apply_batch_ops, apply_organize, check_folder_integrity,
     check_integrity_with_excel, check_keywords, check_path_exists, check_transfer_conflicts,
-    compare_sync, connect_sftp, connect_smb, connect_system_smb, connect_webdav,
-    delete_cleanup_items, delete_connection_password, disconnect_remote, disconnect_smb,
-    empty_trash, filter_files_by_rules, get_disks, get_file_preview, get_home_dir,
-    get_path_info, get_transfer_bandwidth_limit, get_transfer_concurrency, index_root,
-    index_root_incremental,
-    list_folder_contents, list_path_tags, list_remote_dir, list_trash, list_volumes,
-    load_connection_password, match_excel_with_folder, prepare_analysis, prepare_excel_check,
-    prepare_rule_filter, prepare_search, prepare_sync, prepare_transfer, preview_batch_ops,
-    preview_organize, read_excel_info, refresh_disks, remote_path_exists, remote_path_info,
-    remove_path_tag, rename_file, restore_trash_item, run_sync, save_connection_password,
-    scan_cleanup_suggestions, scan_directory, scan_folder_tree, search_files, search_index,
-    search_index_filename, set_path_tag, set_transfer_bandwidth_limit, set_transfer_concurrency,
-    transfer_files,
-    transfer_files_remote, undo_cleanup_delete, undo_organize, verify_duplicate_files,
-    RemoteSessionStore,
+    clear_diagnostics, compare_sync, connect_sftp, connect_smb, connect_system_smb, connect_webdav,
+    cleanup_r2r_temp, delete_cleanup_items, delete_connection_password, delete_remote_paths,
+    disconnect_remote, disconnect_smb,
+    empty_trash, export_diagnostics, filter_files_by_rules, get_diagnostics, get_disks,
+    get_file_preview, get_home_dir, get_path_info, get_transfer_bandwidth_limit,
+    get_transfer_concurrency, index_root, index_root_incremental, list_folder_contents,
+    list_path_tags, list_remote_dir, list_trash, list_volumes, load_connection_password,
+    match_excel_with_folder, preview_batch_ops, preview_organize, read_excel_info, refresh_disks,
+    remote_path_exists, remote_path_info, remove_path_tag, rename_file, restore_trash_item,
+    run_sync, save_connection_password, scan_cleanup_suggestions, scan_directory, scan_folder_tree,
+    search_files, search_index, search_index_filename, set_path_tag, set_transfer_bandwidth_limit,
+    set_transfer_concurrency, transfer_files, transfer_files_remote, trash_user_paths,
+    undo_cleanup_delete, undo_organize, verify_duplicate_files, RemoteSessionStore,
 };
+use job_runner::{cancel_job, prepare_job};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -41,20 +40,14 @@ pub fn run() {
             get_home_dir,
             search_files,
             check_keywords,
-            prepare_search,
-            cancel_search,
-            prepare_excel_check,
-            cancel_excel_check,
+            prepare_job,
+            cancel_job,
             check_path_exists,
             list_volumes,
             analyze_folder,
-            prepare_analysis,
-            cancel_analysis,
             scan_cleanup_suggestions,
             check_transfer_conflicts,
             transfer_files,
-            prepare_transfer,
-            cancel_transfer,
             set_transfer_bandwidth_limit,
             get_transfer_bandwidth_limit,
             set_transfer_concurrency,
@@ -78,21 +71,20 @@ pub fn run() {
             load_connection_password,
             delete_connection_password,
             filter_files_by_rules,
-            prepare_rule_filter,
-            cancel_rule_filter,
             preview_organize,
             apply_organize,
             undo_organize,
             compare_sync,
             run_sync,
-            prepare_sync,
-            cancel_sync,
             index_root,
             index_root_incremental,
             search_index,
             search_index_filename,
             verify_duplicate_files,
+            cleanup_r2r_temp,
             delete_cleanup_items,
+            delete_remote_paths,
+            trash_user_paths,
             undo_cleanup_delete,
             list_trash,
             restore_trash_item,
@@ -105,6 +97,9 @@ pub fn run() {
             connect_webdav,
             connect_sftp,
             disconnect_remote,
+            get_diagnostics,
+            clear_diagnostics,
+            export_diagnostics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

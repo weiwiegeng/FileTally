@@ -1,66 +1,40 @@
-import React, { useLayoutEffect, useRef, useState } from 'react';
+import React from 'react';
 import { Empty, Spin, Typography, Divider } from 'antd';
 import { FolderOpenOutlined, CloudServerOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { List } from 'react-window';
 import { FileTreeNode } from './FileTreeNode';
 import { useFileStore } from '../../stores';
 import { useThemeColors } from '../../hooks';
 import { isRemotePath } from '../../utils/format';
 import { sortFileNodes } from '../../utils/sortFiles';
-import type { FileNode } from '../../types';
 
 const { Text } = Typography;
 
-const ROW_HEIGHT = 34;
-
-interface VirtualRootListProps {
-  nodes: FileNode[];
-  showHidden: boolean;
-  listHeight: number;
+interface FileTreeProps {
+  rootPath?: string;
 }
 
-const VirtualRootList: React.FC<VirtualRootListProps> = ({ nodes, showHidden, listHeight }) => {
-  const height = Math.max(ROW_HEIGHT, Math.min(listHeight, nodes.length * ROW_HEIGHT));
-
-  return (
-    <List
-      style={{ height, width: '100%' }}
-      rowCount={nodes.length}
-      rowHeight={ROW_HEIGHT}
-      rowComponent={({ index, style }) => (
-        <div style={style}>
-          <FileTreeNode node={nodes[index]} level={0} showHidden={showHidden} />
-        </div>
-      )}
-      rowProps={{}}
-    />
-  );
-};
-
-export const FileTree: React.FC = () => {
+/**
+ * Tree must NOT use fixed-row virtualization: expanding a folder renders nested
+ * children inside the row, which a fixed-height list would clip.
+ */
+export const FileTree: React.FC<FileTreeProps> = ({ rootPath }) => {
   const { t } = useTranslation();
-  const { currentPaths, nodesMap, loading, loadingPaths, showHidden, sortField, sortOrder } = useFileStore();
+  const { currentPaths, nodesMap, loading, loadingPaths, showHidden, sortField, sortOrder } =
+    useFileStore();
+  const displayPaths = rootPath
+    ? currentPaths.includes(rootPath)
+      ? [rootPath]
+      : [rootPath]
+    : currentPaths;
   const colors = useThemeColors();
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [paneHeight, setPaneHeight] = useState(480);
-
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const measure = () => setPaneHeight(el.clientHeight);
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [currentPaths.length]);
 
   const getFolderName = (path: string) => {
     const parts = path.replace(/\\/g, '/').split('/');
     return parts[parts.length - 1] || path;
   };
 
-  if (loading && currentPaths.length === 0) {
+  if (loading && displayPaths.length === 0) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
         <Spin tip={t('browser.fileTree.loading')} />
@@ -68,7 +42,7 @@ export const FileTree: React.FC = () => {
     );
   }
 
-  if (currentPaths.length === 0) {
+  if (displayPaths.length === 0) {
     return (
       <Empty
         description={t('browser.fileTree.selectFolderFirst')}
@@ -79,17 +53,17 @@ export const FileTree: React.FC = () => {
   }
 
   return (
-    <div ref={scrollRef} style={{ overflow: 'auto', height: '100%' }}>
-      {currentPaths.map((rootPath, index) => {
-        const nodes = nodesMap[rootPath] || [];
-        const isLoading = loadingPaths.has(rootPath);
-        const isRemote = isRemotePath(rootPath);
+    <div style={{ overflow: 'auto', height: '100%' }}>
+      {displayPaths.map((pathKey, index) => {
+        const nodes = nodesMap[pathKey] || [];
+        const isLoading = loadingPaths.has(pathKey);
+        const isRemote = isRemotePath(pathKey);
 
         const visibleNodes = showHidden ? nodes : nodes.filter((node) => !node.is_hidden);
         const filteredNodes = sortFileNodes(visibleNodes, sortField, sortOrder);
 
         return (
-          <div key={rootPath}>
+          <div key={pathKey}>
             <div
               style={{
                 padding: '8px 12px',
@@ -106,8 +80,16 @@ export const FileTree: React.FC = () => {
               ) : (
                 <FolderOpenOutlined style={{ color: colors.accentOrange }} />
               )}
-              <Text strong style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {getFolderName(rootPath)}
+              <Text
+                strong
+                style={{
+                  flex: 1,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {getFolderName(pathKey)}
               </Text>
               {isLoading && <Spin size="small" />}
             </div>
@@ -122,15 +104,18 @@ export const FileTree: React.FC = () => {
               </div>
             ) : (
               <div style={{ marginBottom: 8 }}>
-                <VirtualRootList
-                  nodes={filteredNodes}
-                  showHidden={showHidden}
-                  listHeight={paneHeight}
-                />
+                {filteredNodes.map((node) => (
+                  <FileTreeNode
+                    key={node.id}
+                    node={node}
+                    level={0}
+                    showHidden={showHidden}
+                  />
+                ))}
               </div>
             )}
 
-            {index < currentPaths.length - 1 && <Divider style={{ margin: '8px 0' }} />}
+            {index < displayPaths.length - 1 && <Divider style={{ margin: '8px 0' }} />}
           </div>
         );
       })}

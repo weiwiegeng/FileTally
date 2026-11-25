@@ -146,7 +146,7 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
     let taskId = '';
     let jobId = 0;
     try {
-      jobId = await invoke<number>('prepare_analysis');
+      jobId = await (await import('../utils/jobs')).prepareJob('analysis');
       taskId = makeTaskId('analysis', jobId);
       useTaskStore.getState().upsertTask({
         id: taskId,

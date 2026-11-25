@@ -31,7 +31,15 @@ import { RuleFilter } from '../rules';
 import { OrganizePanel } from '../organize';
 import { SyncPanel } from '../sync';
 import { TrashPanel } from '../trash';
-import { useSettingsStore, useTaskStore } from '../../stores';
+import {
+  useSettingsStore,
+  useTaskStore,
+  useNavigationStore,
+  useDualPaneStore,
+  useFileStore,
+  useTransferStore,
+} from '../../stores';
+import { buildTransferItems, resolveTransferSetup } from '../browser/dualPaneTransfer';
 
 const { Sider, Content } = Layout;
 const { Title } = Typography;
@@ -62,6 +70,53 @@ export const MainLayout: React.FC = () => {
   const activeTaskCount = useTaskStore((s) =>
     s.tasks.filter((t) => t.status === 'running' || t.status === 'queued').length
   );
+  const requestedMenu = useNavigationStore((s) => s.requestedMenu);
+  const pendingBrowser = useNavigationStore((s) => s.pendingBrowser);
+  const pendingTransfer = useNavigationStore((s) => s.pendingTransfer);
+  const consumePending = useNavigationStore((s) => s.consumePending);
+
+  useEffect(() => {
+    if (!requestedMenu) return;
+    setActiveMenu(requestedMenu as MenuKey);
+
+    if (requestedMenu === 'browser') {
+      const path = pendingBrowser?.path;
+      const pane = pendingBrowser?.pane;
+      if (!path) {
+        consumePending();
+        return;
+      }
+      if (settings.dualPaneBrowser) {
+        const dual = useDualPaneStore.getState();
+        if (pane === 'right') {
+          dual.setRightRoot(path);
+        } else {
+          dual.setLeftRoot(path);
+        }
+        dual.setActivePane(pane ?? 'left');
+      }
+      void useFileStore.getState().addPath(path);
+    }
+
+    if (requestedMenu === 'transfer' && pendingTransfer) {
+      const transfer = useTransferStore.getState();
+      const { sources, target } = pendingTransfer;
+      void (async () => {
+        const items = await buildTransferItems(sources);
+        const setup = target
+          ? resolveTransferSetup(sources, target)
+          : null;
+        transfer.setDirection(setup?.direction ?? transfer.direction);
+        transfer.clearSourceItems();
+        transfer.addSourceItems(items, setup?.sourceConnectionName);
+        if (target) {
+          transfer.setTargetPath(target, setup?.targetConnectionName);
+        }
+      })();
+    }
+
+    consumePending();
+  }, [requestedMenu, pendingBrowser, pendingTransfer, settings.dualPaneBrowser, consumePending]);
 
   const resolveDefaultPage = (page: string): MenuKey => {
     if (page === 'search') return 'filter';
@@ -145,7 +200,7 @@ export const MainLayout: React.FC = () => {
     },
     {
       type: 'group' as const,
-      label: t('menu.groupSmart'),
+      label: t('menu.groupPro'),
       children: [
         { key: 'excel', icon: <FileExcelOutlined />, label: t('menu.excelCheck') },
         { key: 'ai', icon: <RobotOutlined />, label: t('menu.aiAnalysis') },

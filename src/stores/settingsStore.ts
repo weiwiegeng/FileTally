@@ -44,6 +44,8 @@ export interface AppSettings {
   sortBy: SortField;
   sortOrder: SortOrder;
   previewPanelPosition: 'right' | 'bottom';
+  /** Side-by-side local/remote panes in file browser */
+  dualPaneBrowser: boolean;
   
   // 搜索设置
   defaultSearchContent: boolean;
@@ -83,6 +85,7 @@ const defaultSettings: AppSettings = {
   sortBy: 'name',
   sortOrder: 'asc',
   previewPanelPosition: 'right',
+  dualPaneBrowser: true,
   
   // 搜索设置
   defaultSearchContent: true,

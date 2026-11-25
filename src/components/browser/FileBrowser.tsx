@@ -39,6 +39,7 @@ import {
   useTagStore,
 } from '../../stores';
 import { BatchOpsModal } from './BatchOpsModal';
+import { DualPaneFileBrowser } from './DualPaneFileBrowser';
 import { FileTree } from './FileTree';
 import { FileListView } from './FileListView';
 import { FilePreview } from './FilePreview';
@@ -138,6 +139,10 @@ export const FileBrowser: React.FC = () => {
     const parts = path.replace(/\\/g, '/').split('/');
     return parts[parts.length - 1] || path;
   };
+
+  if (settings.dualPaneBrowser) {
+    return <DualPaneFileBrowser />;
+  }
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>

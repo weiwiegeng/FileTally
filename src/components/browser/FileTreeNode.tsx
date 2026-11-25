@@ -6,6 +6,7 @@ import type { MenuProps } from 'antd';
 import { FileNode } from '../../types';
 import { FileIcon } from './FileIcon';
 import { useFileStore } from '../../stores';
+import { useBrowserPaneContext } from './BrowserPaneContext';
 import { useThemeColors } from '../../hooks';
 import { formatSize, formatDate, sortFileNodes, mapBackendError } from '../../utils';
 
@@ -22,8 +23,8 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
 }) => {
   const { t } = useTranslation();
   const {
-    expandedIds,
-    toggleExpand,
+    expandedIds: globalExpanded,
+    toggleExpand: globalToggleExpand,
     loadChildren,
     selectFile,
     selectedFile,
@@ -31,10 +32,15 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
     sortField,
     sortOrder,
   } = useFileStore();
+  const paneCtx = useBrowserPaneContext();
   const colors = useThemeColors();
 
-  const isExpanded = expandedIds.has(node.id);
-  const isSelected = selectedFile?.id === node.id;
+  const isExpanded = paneCtx
+    ? paneCtx.expandedIds.includes(node.id)
+    : globalExpanded.has(node.id);
+  const isSelected = paneCtx
+    ? paneCtx.selectedPaths.includes(node.path)
+  : selectedFile?.id === node.id;
   const [isLoading, setIsLoading] = React.useState(false);
   
   // 重命名状态
@@ -122,21 +128,45 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
     return null;
   }
 
-  const handleClick = async () => {
-    selectFile(node);
-  };
+  const handleExpand = async (e?: React.MouseEvent) => {
+    e?.stopPropagation();
 
-  const handleExpand = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    
     if (!node.is_dir) return;
 
     if (!node.is_loaded && !isExpanded) {
       setIsLoading(true);
-      await loadChildren(node.path, node.id);
-      setIsLoading(false);
+      try {
+        await loadChildren(node.path, node.id);
+      } finally {
+        setIsLoading(false);
+      }
     }
-    toggleExpand(node.id);
+    if (paneCtx) {
+      paneCtx.toggleExpand(node.id);
+    } else {
+      globalToggleExpand(node.id);
+    }
+  };
+
+  const handleClick = async (e: React.MouseEvent) => {
+    if (paneCtx) {
+      paneCtx.onSelectPath(node.path, {
+        additive: e.metaKey || e.ctrlKey,
+        range: e.shiftKey,
+      });
+      if (paneCtx.previewActive) {
+        await selectFile(node);
+      }
+      return;
+    }
+    await selectFile(node);
+  };
+
+  const handleDoubleClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (node.is_dir) {
+      await handleExpand();
+    }
   };
 
   const children = node.children || [];
@@ -154,6 +184,16 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
       >
         <div
           onClick={handleClick}
+          onDoubleClick={(e) => void handleDoubleClick(e)}
+          draggable={Boolean(paneCtx?.enableDrag && paneCtx.selectedPaths.includes(node.path))}
+          onDragStart={(e) => {
+            if (!paneCtx?.selectedPaths.length) return;
+            e.dataTransfer.setData(
+              'application/json',
+              JSON.stringify(paneCtx.selectedPaths)
+            );
+            e.dataTransfer.effectAllowed = 'copy';
+          }}
           style={{
             display: 'flex',
             alignItems: 'center',

@@ -116,4 +116,18 @@ mod tests {
     fn reject_remote_traversal() {
         assert!(parse_remote_path("remote://abc/../etc").is_err());
     }
+
+    #[test]
+    fn validate_file_name_rejects_illegal() {
+        assert!(validate_file_name("").is_err());
+        assert!(validate_file_name("..").is_err());
+        assert!(validate_file_name("bad/name").is_err());
+        assert_eq!(validate_file_name("report.pdf").unwrap(), "report.pdf");
+    }
+
+    #[test]
+    fn is_remote_path_prefix() {
+        assert!(is_remote_path("remote://conn/foo"));
+        assert!(!is_remote_path("/Users/foo"));
+    }
 }

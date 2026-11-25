@@ -318,7 +318,7 @@ export const ExcelCheck: React.FC = () => {
   };
 
   const beginCheckJob = async () => {
-    const jobId = await invoke<number>('prepare_excel_check');
+    const jobId = await (await import('../../utils/jobs')).prepareJob('excel');
     activeJobIdRef.current = jobId;
     setCheckProgress({ jobId, stage: 'preparing', current: 0, total: 0, message: '' });
     setProgressStartedAt(Date.now());
@@ -328,7 +328,7 @@ export const ExcelCheck: React.FC = () => {
   const handleCancelCheck = async () => {
     const jobId = activeJobIdRef.current;
     try {
-      await invoke('cancel_excel_check', { jobId });
+      await (await import('../../utils/jobs')).cancelJob(jobId, 'excel');
       message.info(t('excel.messages.cancelRequested'));
     } catch (error) {
       message.error(t('excel.messages.cancelFailed', { error: mapBackendError(error) }));

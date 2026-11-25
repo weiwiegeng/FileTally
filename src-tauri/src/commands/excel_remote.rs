@@ -5,10 +5,9 @@ use std::path::Path;
 
 use tauri::AppHandle;
 
-use super::excel_runtime::{
-    emit_progress, is_cancelled, PER_FOLDER_ENTRY_SOFT_CAP, SCAN_ENTRY_SOFT_CAP,
-};
+use super::excel_runtime::{emit_progress, PER_FOLDER_ENTRY_SOFT_CAP, SCAN_ENTRY_SOFT_CAP};
 use super::remote::{RemoteSession, RemoteSessionStore, SmbSessionStore};
+use crate::job_runner;
 use crate::path_util::{join_remote_path, parse_remote_path};
 
 /// Recursively walk remote dir; push `(remote_path, size, is_dir)`. Honors cancel + soft cap.
@@ -22,7 +21,7 @@ async fn walk_remote_cancellable(
     job_id: u64,
     progress_every: usize,
 ) -> Result<(), String> {
-    if out.len() >= cap || is_cancelled(job_id) {
+    if out.len() >= cap || job_runner::is_cancelled(job_id) {
         return Ok(());
     }
 
@@ -44,7 +43,7 @@ async fn walk_remote_cancellable(
     };
 
     for e in entries {
-        if is_cancelled(job_id) {
+        if job_runner::is_cancelled(job_id) {
             return Ok(());
         }
         if e.name == "." || e.name == ".." {
@@ -131,7 +130,7 @@ pub async fn collect_remote_names(
             push_name_and_stem(&mut names, name);
         }
     }
-    Ok((names, truncated || is_cancelled(job_id)))
+    Ok((names, truncated || job_runner::is_cancelled(job_id)))
 }
 
 /// First-level remote directories (person/case folders).

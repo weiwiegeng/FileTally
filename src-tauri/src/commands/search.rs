@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use walkdir::WalkDir;
 use regex::RegexBuilder;
@@ -32,25 +32,9 @@ fn emit_search_progress(app: &AppHandle, job_id: u64, stage: &str, current: u64,
     );
 }
 
-/// Per-job cancel: cancel only affects the job id that was current when cancel was called.
-static SEARCH_JOB_ID: AtomicU64 = AtomicU64::new(0);
-static SEARCH_CANCEL_ID: AtomicU64 = AtomicU64::new(0);
-
 const SEARCH_FILE_CAP: usize = 500_000;
 /// After walk cancel/timeout, still scan a bounded set for partial hits (then honor cancel again).
 const POST_WALK_CANCEL_CAP: usize = 2_000;
-
-fn begin_search_job() -> u64 {
-    SEARCH_JOB_ID.fetch_add(1, Ordering::SeqCst) + 1
-}
-
-fn is_search_cancelled(job_id: u64) -> bool {
-    SEARCH_CANCEL_ID.load(Ordering::SeqCst) == job_id
-}
-
-fn clear_search_cancel(job_id: u64) {
-    let _ = SEARCH_CANCEL_ID.compare_exchange(job_id, 0, Ordering::SeqCst, Ordering::SeqCst);
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,24 +123,6 @@ impl Default for SearchOptions {
             max_concurrency: Some(4),
         }
     }
-}
-
-/// 预分配搜索 job id（供前端超时/取消精确指向，避免误杀后续任务）
-#[tauri::command]
-pub fn prepare_search() -> Result<u64, String> {
-    Ok(begin_search_job())
-}
-
-/// 取消指定搜索 job；未传 job_id 时取消当前 job
-#[tauri::command]
-pub fn cancel_search(job_id: Option<u64>) -> Result<(), String> {
-    let id = job_id
-        .filter(|v| *v > 0)
-        .unwrap_or_else(|| SEARCH_JOB_ID.load(Ordering::SeqCst));
-    if id > 0 {
-        SEARCH_CANCEL_ID.store(id, Ordering::SeqCst);
-    }
-    Ok(())
 }
 
 /// 判断文件是否为文本文件
@@ -288,7 +254,7 @@ fn search_single_file(
     respect_cancel: bool,
 ) -> FileSearchResult {
     // Walk-phase cancel keeps respect_cancel=false so already-listed files still yield partial hits.
-    if respect_cancel && is_search_cancelled(job_id) {
+    if respect_cancel && crate::job_runner::is_cancelled(job_id) {
         return FileSearchResult::Skipped;
     }
 
@@ -369,10 +335,8 @@ pub async fn search_files(
     options: SearchOptions,
     job_id: Option<u64>,
 ) -> Result<SearchResponse, String> {
-    let resolved_job = match job_id {
-        Some(id) if id > 0 => id,
-        _ => begin_search_job(),
-    };
+    let resolved_job =
+        crate::job_runner::resolve_or_begin(job_id, crate::job_runner::JobKind::Search);
     emit_search_progress(&app, resolved_job, "scanning", 0, 0, &query);
 
     let mut remote_paths = Vec::new();
@@ -429,6 +393,7 @@ pub async fn search_files(
         &query,
     );
 
+    crate::job_runner::end_job(resolved_job);
     Ok(SearchResponse {
         matched,
         unmatched,
@@ -583,10 +548,7 @@ fn search_files_sync(
     options: SearchOptions,
     job_id: Option<u64>,
 ) -> Result<SearchResponse, String> {
-    let job_id = match job_id {
-        Some(id) if id > 0 => id,
-        _ => begin_search_job(),
-    };
+    let job_id = crate::job_runner::resolve_or_begin(job_id, crate::job_runner::JobKind::Search);
 
     if paths.is_empty() {
         return Err(crate::err::code("search_need_paths"));
@@ -615,7 +577,7 @@ fn search_files_sync(
     'outer: for path in &paths {
         let search_path = Path::new(path);
         for entry in WalkDir::new(search_path).follow_links(false).into_iter().filter_map(|e| e.ok()) {
-            if is_search_cancelled(job_id) {
+            if crate::job_runner::is_cancelled(job_id) {
                 cancelled_during_walk = true;
                 break 'outer;
             }
@@ -658,7 +620,7 @@ fn search_files_sync(
     // but cap the set and keep respect_cancel=true so a new cancel/timeout still stops work.
     let walk_cancelled = cancelled_during_walk;
     if walk_cancelled {
-        clear_search_cancel(job_id);
+        crate::job_runner::clear_cancel(job_id);
         if files_to_search.len() > POST_WALK_CANCEL_CAP {
             files_to_search.truncate(POST_WALK_CANCEL_CAP);
         }
@@ -695,7 +657,7 @@ fn search_files_sync(
             .collect()
     });
 
-    let cancelled = walk_cancelled || is_search_cancelled(job_id);
+    let cancelled = walk_cancelled || crate::job_runner::is_cancelled(job_id);
     
     let mut matched = Vec::new();
     let mut unmatched = Vec::new();
@@ -752,7 +714,7 @@ fn check_file_keywords(
     respect_cancel: bool,
     scanned: &AtomicUsize,
 ) -> Option<KeywordCheckResult> {
-    if respect_cancel && is_search_cancelled(job_id) {
+    if respect_cancel && crate::job_runner::is_cancelled(job_id) {
         return None;
     }
     scanned.fetch_add(1, Ordering::Relaxed);
@@ -856,10 +818,7 @@ fn check_keywords_sync(
     options: SearchOptions,
     job_id: Option<u64>,
 ) -> Result<KeywordCheckResponse, String> {
-    let job_id = match job_id {
-        Some(id) if id > 0 => id,
-        _ => begin_search_job(),
-    };
+    let job_id = crate::job_runner::resolve_or_begin(job_id, crate::job_runner::JobKind::Search);
 
     if paths.is_empty() {
         return Err(crate::err::code("search_need_paths"));
@@ -888,7 +847,7 @@ fn check_keywords_sync(
     'outer: for path in &paths {
         let search_path = Path::new(path);
         for entry in WalkDir::new(search_path).follow_links(false).into_iter().filter_map(|e| e.ok()) {
-            if is_search_cancelled(job_id) {
+            if crate::job_runner::is_cancelled(job_id) {
                 cancelled_during_walk = true;
                 break 'outer;
             }
@@ -917,7 +876,7 @@ fn check_keywords_sync(
 
     let walk_cancelled = cancelled_during_walk;
     if walk_cancelled {
-        clear_search_cancel(job_id);
+        crate::job_runner::clear_cancel(job_id);
         if files_to_check.len() > POST_WALK_CANCEL_CAP {
             files_to_check.truncate(POST_WALK_CANCEL_CAP);
         }
@@ -956,7 +915,7 @@ fn check_keywords_sync(
             .collect()
     });
 
-    let cancelled = walk_cancelled || is_search_cancelled(job_id);
+    let cancelled = walk_cancelled || crate::job_runner::is_cancelled(job_id);
     
     let mut check_results = Vec::new();
     let total_scanned = if cancelled {
@@ -975,6 +934,7 @@ fn check_keywords_sync(
     
     let total_with_missing = check_results.len();
     
+    crate::job_runner::end_job(job_id);
     Ok(KeywordCheckResponse {
         results: check_results,
         total_scanned,

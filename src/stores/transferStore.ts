@@ -4,6 +4,13 @@ import i18n from '../i18n';
 import { mapBackendError } from '../utils/backendError';
 import { makeTaskId, useTaskStore } from './taskStore';
 import { useSettingsStore } from './settingsStore';
+import { cancelJob, prepareJob } from '../utils/jobs';
+import {
+  TRANSFER_QUEUE_KEY,
+  parseTransferQueue,
+  serializeTransferQueue,
+  transferRetryPayload as buildTransferRetryPayload,
+} from '../utils/transferQueue';
 
 // 传输方向
 export type TransferDirection = 'upload' | 'download';
@@ -136,10 +143,52 @@ const formatSize = (size: number): string => {
 // 生成唯一 ID
 const generateId = () => Math.random().toString(36).substring(2, 15);
 
-const transferQueue: TransferJobSnapshot[] = [];
+const loadPersistedQueue = (): TransferJobSnapshot[] => {
+  try {
+    return parseTransferQueue(localStorage.getItem(TRANSFER_QUEUE_KEY));
+  } catch {
+    return [];
+  }
+};
+
+const savePersistedQueue = (queue: TransferJobSnapshot[]) => {
+  try {
+    const raw = serializeTransferQueue(queue);
+    if (!raw) {
+      localStorage.removeItem(TRANSFER_QUEUE_KEY);
+    } else {
+      localStorage.setItem(TRANSFER_QUEUE_KEY, raw);
+    }
+  } catch {
+    /* ignore quota / private mode */
+  }
+};
+
+let transferQueue: TransferJobSnapshot[] = loadPersistedQueue();
+
+const persistQueue = () => savePersistedQueue(transferQueue);
+
+export const getQueuedTransfers = (): TransferJobSnapshot[] => [...transferQueue];
+
+export const hasPersistedQueue = (): boolean => transferQueue.length > 0;
+
+export const clearPersistedTransferQueue = () => {
+  transferQueue = [];
+  persistQueue();
+};
+
+/** Pop the head job and start it (used after boot resume). */
+export const resumePersistedTransferQueue = () => {
+  const first = transferQueue.shift();
+  persistQueue();
+  if (first) {
+    void useTransferStore.getState().startTransfer(first.resolution, first);
+  }
+};
 
 const drainTransferQueue = () => {
   const next = transferQueue.shift();
+  persistQueue();
   if (!next) return;
   void useTransferStore.getState().startTransfer(next.resolution, next);
 };
@@ -166,16 +215,7 @@ const snapshotFromState = (
   };
 };
 
-export const transferRetryPayload = (job: TransferJobSnapshot) => ({
-  action: 'transfer' as const,
-  resolution: job.resolution,
-  sourcePaths: job.sourceItems.map((i) => i.sourcePath),
-  sourceItems: job.sourceItems,
-  targetPath: job.targetPath,
-  sourceConnectionName: job.sourceConnectionName,
-  targetConnectionName: job.targetConnectionName,
-  direction: job.direction,
-});
+export const transferRetryPayload = buildTransferRetryPayload;
 
 export const useTransferStore = create<TransferState>((set, get) => ({
   // 初始状态
@@ -280,6 +320,7 @@ export const useTransferStore = create<TransferState>((set, get) => ({
 
     if (state.transferring) {
       transferQueue.push({ ...snapshot, resolution });
+      persistQueue();
       return;
     }
 
@@ -297,7 +338,7 @@ export const useTransferStore = create<TransferState>((set, get) => ({
     
     let jobId = 0;
     try {
-      jobId = await invoke<number>('prepare_transfer');
+      jobId = await prepareJob('transfer');
     } catch (err) {
       set({ error: mapBackendError(err) });
       return;
@@ -389,7 +430,7 @@ export const useTransferStore = create<TransferState>((set, get) => ({
   cancelTransfer: async () => {
     const { activeJobId } = get();
     try {
-      await invoke('cancel_transfer', { jobId: activeJobId > 0 ? activeJobId : null });
+      await cancelJob(activeJobId > 0 ? activeJobId : null, 'transfer');
     } catch (err) {
       console.error('cancel transfer failed:', err);
     }

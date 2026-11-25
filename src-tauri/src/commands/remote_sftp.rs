@@ -147,6 +147,18 @@ pub fn sftp_write_file(session: &SftpSession, rel: &str, data: &[u8]) -> Result<
     Ok(())
 }
 
+pub fn sftp_unlink(session: &SftpSession, rel: &str) -> Result<(), String> {
+    if rel.trim().is_empty() {
+        return Err(err::code("remote_path_is_dir"));
+    }
+    let path = remote_path(session, rel);
+    let sess = connect_session(&session.host, session.port, &session.username, &session.password)?;
+    let sftp = sess.sftp().map_err(|e| err::with_detail("sftp_delete_failed", e))?;
+    sftp.unlink(Path::new(&path))
+        .map_err(|e| err::with_detail("sftp_delete_failed", e))?;
+    Ok(())
+}
+
 pub fn sftp_stat_is_dir(session: &SftpSession, rel: &str) -> Result<bool, String> {
     let path = remote_path(session, rel);
     let sess = connect_session(&session.host, session.port, &session.username, &session.password)?;

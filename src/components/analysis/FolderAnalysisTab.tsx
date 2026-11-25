@@ -138,7 +138,10 @@ export const FolderAnalysisTab: React.FC = () => {
 
   const handleCancelAnalyze = async () => {
     try {
-      await invoke('cancel_analysis', { jobId: activeJobId > 0 ? activeJobId : null });
+      await (await import('../../utils/jobs')).cancelJob(
+        activeJobId > 0 ? activeJobId : null,
+        'analysis'
+      );
     } catch {
       // ignore
     }

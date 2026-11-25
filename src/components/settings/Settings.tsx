@@ -26,6 +26,7 @@ import {
   ThunderboltOutlined,
   InfoCircleOutlined,
   ReloadOutlined,
+  DownloadOutlined,
   RobotOutlined,
   ApiOutlined,
   CheckCircleOutlined,
@@ -51,6 +52,30 @@ export const Settings: React.FC = () => {
   const colors = useThemeColors();
   const [testingConnection, setTestingConnection] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [exportingDiagnostics, setExportingDiagnostics] = useState(false);
+
+  const handleExportDiagnostics = async () => {
+    setExportingDiagnostics(true);
+    try {
+      const json = await invoke<string>('export_diagnostics');
+      await navigator.clipboard.writeText(json);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `filetally-diagnostics-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      message.success(t('settings.diagnosticsExported'));
+    } catch (err) {
+      console.error('export diagnostics failed:', err);
+      message.error(t('settings.diagnosticsExportFailed'));
+    } finally {
+      setExportingDiagnostics(false);
+    }
+  };
 
   const handleReset = () => {
     resetSettings();
@@ -305,6 +330,16 @@ export const Settings: React.FC = () => {
                     ]}
                   />
                 </Form.Item>
+
+                <Form.Item
+                  label={t('settings.dualPaneBrowser')}
+                  extra={t('settings.dualPaneBrowserHint')}
+                >
+                  <Switch
+                    checked={settings.dualPaneBrowser}
+                    onChange={(checked) => updateSettings({ dualPaneBrowser: checked })}
+                  />
+                </Form.Item>
               </Form>
             </Card>
           </Col>
@@ -383,6 +418,12 @@ export const Settings: React.FC = () => {
                     style={{ width: '100%' }}
                     addonAfter={t('settings.secondsSuffix')}
                   />
+                </Form.Item>
+
+                <Form.Item>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {t('settings.searchIndexLocalOnly')}
+                  </Text>
                 </Form.Item>
               </Form>
             </Card>
@@ -648,6 +689,16 @@ export const Settings: React.FC = () => {
                   <Paragraph type="secondary" style={{ fontSize: 12 }}>
                     {t('settings.techStack')}
                   </Paragraph>
+                  <Button
+                    icon={<DownloadOutlined />}
+                    loading={exportingDiagnostics}
+                    onClick={() => void handleExportDiagnostics()}
+                  >
+                    {t('settings.exportDiagnostics')}
+                  </Button>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {t('settings.diagnosticsExportHint')}
+                  </Text>
                 </Col>
                 <Col xs={24} md={12}>
                   <Space direction="vertical" size="small">

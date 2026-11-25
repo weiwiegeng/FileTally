@@ -42,7 +42,6 @@ export const OrganizePanel: React.FC = () => {
   const [pattern, setPattern] = useState('{name}_{index}{ext}');
   const [preview, setPreview] = useState<OrganizeChange[]>([]);
   const [loading, setLoading] = useState(false);
-
   const pickRoot = async () => {
     const selected = await open({ directory: true, multiple: false });
     if (typeof selected === 'string') setRoot(selected);

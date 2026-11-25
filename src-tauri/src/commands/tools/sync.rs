@@ -2,13 +2,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::UNIX_EPOCH;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
-use crate::commands::remote::{download_remote_file, upload_local_file, walk_remote_files, RemoteSessionStore};
+use crate::commands::remote::{
+    delete_remote_path, download_remote_file, transfer_remote_to_remote_job, upload_local_file,
+    walk_remote_files, RemoteSessionStore,
+};
+use crate::job_runner::{self, JobKind};
 use crate::path_util::{self, join_remote_path, parse_remote_path};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +28,8 @@ pub struct SyncCompareResult {
     pub added: Vec<SyncFileEntry>,
     pub changed: Vec<SyncFileEntry>,
     pub extra: Vec<SyncFileEntry>,
+    pub conflicts: Vec<SyncFileEntry>,
+    pub mode: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -35,21 +40,6 @@ pub struct SyncProgress {
     pub current: u64,
     pub total: u64,
     pub message: String,
-}
-
-static SYNC_JOB_ID: AtomicU64 = AtomicU64::new(0);
-static SYNC_CANCEL_ID: AtomicU64 = AtomicU64::new(0);
-
-fn begin_sync_job() -> u64 {
-    SYNC_JOB_ID.fetch_add(1, Ordering::SeqCst) + 1
-}
-
-fn is_sync_cancelled(job_id: u64) -> bool {
-    SYNC_CANCEL_ID.load(Ordering::SeqCst) == job_id
-}
-
-fn clear_sync_cancel(job_id: u64) {
-    let _ = SYNC_CANCEL_ID.compare_exchange(job_id, 0, Ordering::SeqCst, Ordering::SeqCst);
 }
 
 fn emit_sync_progress(app: &AppHandle, job_id: u64, stage: &str, current: u64, total: u64, message: &str) {
@@ -65,24 +55,16 @@ fn emit_sync_progress(app: &AppHandle, job_id: u64, stage: &str, current: u64, t
     );
 }
 
-#[tauri::command]
-pub fn prepare_sync() -> Result<u64, String> {
-    Ok(begin_sync_job())
-}
-
-#[tauri::command]
-pub fn cancel_sync(job_id: Option<u64>) -> Result<(), String> {
-    let id = job_id.unwrap_or_else(|| SYNC_JOB_ID.load(Ordering::SeqCst));
-    SYNC_CANCEL_ID.store(id, Ordering::SeqCst);
-    Ok(())
-}
-
 fn modified_secs(meta: &fs::Metadata) -> i64 {
     meta.modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn files_differ(src: &SyncFileEntry, dst: &SyncFileEntry) -> bool {
+    dst.size != src.size || (src.modified != 0 && dst.modified != 0 && dst.modified != src.modified)
 }
 
 fn list_local_files(root: &Path) -> Result<HashMap<String, SyncFileEntry>, String> {
@@ -148,7 +130,7 @@ async fn list_remote_file_map(
     Ok(map)
 }
 
-fn compare_maps(
+fn compare_maps_one_way(
     source: &HashMap<String, SyncFileEntry>,
     dest: &HashMap<String, SyncFileEntry>,
 ) -> SyncCompareResult {
@@ -160,7 +142,7 @@ fn compare_maps(
         match dest.get(k) {
             None => added.push(src.clone()),
             Some(dst) => {
-                if dst.size != src.size || (src.modified != 0 && dst.modified != 0 && dst.modified != src.modified) {
+                if files_differ(src, dst) {
                     changed.push(src.clone());
                 }
             }
@@ -176,6 +158,41 @@ fn compare_maps(
         added,
         changed,
         extra,
+        conflicts: Vec::new(),
+        mode: "one_way".into(),
+    }
+}
+
+fn compare_maps_two_way(
+    source: &HashMap<String, SyncFileEntry>,
+    dest: &HashMap<String, SyncFileEntry>,
+) -> SyncCompareResult {
+    let mut added = Vec::new();
+    let mut extra = Vec::new();
+    let mut conflicts = Vec::new();
+
+    for (k, src) in source {
+        match dest.get(k) {
+            None => added.push(src.clone()),
+            Some(dst) => {
+                if files_differ(src, dst) {
+                    conflicts.push(src.clone());
+                }
+            }
+        }
+    }
+    for (k, dst) in dest {
+        if !source.contains_key(k) {
+            extra.push(dst.clone());
+        }
+    }
+
+    SyncCompareResult {
+        added,
+        changed: Vec::new(),
+        extra,
+        conflicts,
+        mode: "two_way".into(),
     }
 }
 
@@ -183,6 +200,7 @@ pub async fn compare_sync_inner(
     store: &RemoteSessionStore,
     source: &str,
     dest: &str,
+    mode: &str,
 ) -> Result<SyncCompareResult, String> {
     path_util::validate_user_path(source)?;
     path_util::validate_user_path(dest)?;
@@ -210,7 +228,11 @@ pub async fn compare_sync_inner(
         list_local_files(p)?
     };
 
-    Ok(compare_maps(&source_map, &dest_map))
+    Ok(if mode == "two_way" {
+        compare_maps_two_way(&source_map, &dest_map)
+    } else {
+        compare_maps_one_way(&source_map, &dest_map)
+    })
 }
 
 #[tauri::command]
@@ -218,8 +240,136 @@ pub async fn compare_sync(
     store: tauri::State<'_, Arc<RemoteSessionStore>>,
     source: String,
     dest: String,
+    mode: Option<String>,
 ) -> Result<SyncCompareResult, String> {
-    compare_sync_inner(store.as_ref(), &source, &dest).await
+    let mode = mode.as_deref().unwrap_or("one_way");
+    compare_sync_inner(store.as_ref(), &source, &dest, mode).await
+}
+
+async fn copy_rel_path(
+    store: &RemoteSessionStore,
+    source: &str,
+    dest: &str,
+    rel: &str,
+    job_id: u64,
+) -> Result<(), String> {
+    if job_runner::is_cancelled(job_id) {
+        return Err(crate::err::code("sync_cancelled"));
+    }
+    let source_is_remote = path_util::is_remote_path(source);
+    let dest_is_remote = path_util::is_remote_path(dest);
+
+    if source_is_remote && dest_is_remote {
+        let (cid, base_rel) = parse_remote_path(source)?;
+        let remote_src = join_remote_path(
+            &cid,
+            &format!(
+                "{}{}",
+                if base_rel.is_empty() {
+                    String::new()
+                } else {
+                    format!("{base_rel}/")
+                },
+                rel
+            ),
+        );
+        let (dcid, dbase) = parse_remote_path(dest)?;
+        let remote_dest_dir = if dbase.is_empty() {
+            join_remote_path(&dcid, "")
+        } else {
+            join_remote_path(&dcid, &dbase)
+        };
+        let (_, _, failed, errors) = transfer_remote_to_remote_job(
+            store,
+            &remote_src,
+            &remote_dest_dir,
+            "overwrite",
+            job_id,
+        )
+        .await?;
+        if failed > 0 {
+            return Err(errors
+                .first()
+                .cloned()
+                .unwrap_or_else(|| crate::err::code("sync_copy_failed")));
+        }
+        return Ok(());
+    }
+
+    let source_local = PathBuf::from(source);
+    let dest_local = PathBuf::from(dest);
+
+    if source_is_remote {
+        let (cid, base_rel) = parse_remote_path(source)?;
+        let remote = join_remote_path(
+            &cid,
+            &format!(
+                "{}{}",
+                if base_rel.is_empty() {
+                    String::new()
+                } else {
+                    format!("{base_rel}/")
+                },
+                rel
+            ),
+        );
+        let local_dest = dest_local.join(rel);
+        download_remote_file(store, &remote, &local_dest).await
+    } else if dest_is_remote {
+        let local_src = source_local.join(rel);
+        let (cid, base_rel) = parse_remote_path(dest)?;
+        let remote = join_remote_path(
+            &cid,
+            &format!(
+                "{}{}",
+                if base_rel.is_empty() {
+                    String::new()
+                } else {
+                    format!("{base_rel}/")
+                },
+                rel
+            ),
+        );
+        upload_local_file(store, &local_src, &remote).await
+    } else {
+        let src = source_local.join(rel);
+        let dst = dest_local.join(rel);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).map_err(|e| crate::err::with_detail("sync_copy_failed", e))?;
+        }
+        fs::copy(&src, &dst).map_err(|e| crate::err::with_detail("sync_copy_failed", e))?;
+        Ok(())
+    }
+}
+
+async fn delete_rel_at_dest(
+    store: &RemoteSessionStore,
+    _dest: &str,
+    rel: &str,
+    dest_is_remote: bool,
+    dest_remote: &Option<(String, String)>,
+    dest_local: &PathBuf,
+) {
+    if dest_is_remote {
+        if let Some((cid, base_rel)) = dest_remote {
+            let remote = join_remote_path(
+                &cid,
+                &format!(
+                    "{}{}",
+                    if base_rel.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{base_rel}/")
+                    },
+                    rel
+                ),
+            );
+            let _ = delete_remote_path(store, &remote).await;
+        }
+    } else {
+        let p = dest_local.join(rel);
+        let _ = fs::remove_file(p);
+    }
 }
 
 #[tauri::command]
@@ -230,109 +380,100 @@ pub async fn run_sync(
     dest: String,
     delete_extras: Option<bool>,
     job_id: Option<u64>,
+    mode: Option<String>,
+    conflict_resolution: Option<String>,
 ) -> Result<SyncCompareResult, String> {
-    let job_id = job_id.unwrap_or_else(|| begin_sync_job());
+    let job_id = job_runner::resolve_or_begin(job_id, JobKind::Sync);
     let delete_extras = delete_extras.unwrap_or(false);
-
-    let diff = compare_sync_inner(store.as_ref(), &source, &dest).await?;
-
-    let source_is_remote = path_util::is_remote_path(&source);
-    let dest_is_remote = path_util::is_remote_path(&dest);
-    if source_is_remote && dest_is_remote {
-        return Err(crate::err::code("sync_remote_to_remote_unsupported"));
+    let mode = mode.as_deref().unwrap_or("one_way");
+    let conflict_resolution = conflict_resolution.as_deref().unwrap_or("skip");
+    match conflict_resolution {
+        "skip" | "prefer_source" | "prefer_dest" => {}
+        _ => return Err(crate::err::code("invalid_conflict_resolution")),
     }
 
-    let to_copy: Vec<&SyncFileEntry> = diff.added.iter().chain(diff.changed.iter()).collect();
-    let total = to_copy.len() as u64 + if delete_extras { diff.extra.len() as u64 } else { 0 };
-    emit_sync_progress(&app, job_id, "syncing", 0, total, "starting");
+    let diff = compare_sync_inner(store.as_ref(), &source, &dest, mode).await?;
 
-    let source_remote = if source_is_remote {
-        Some(parse_remote_path(&source)?)
-    } else {
-        None
-    };
+    let dest_is_remote = path_util::is_remote_path(&dest);
+
     let dest_remote = if dest_is_remote {
         Some(parse_remote_path(&dest)?)
     } else {
         None
     };
-
-    let source_local = PathBuf::from(&source);
     let dest_local = PathBuf::from(&dest);
 
+    let mut work: Vec<(String, &'static str)> = Vec::new();
+    if mode == "two_way" {
+        for e in &diff.added {
+            work.push((e.relative_path.clone(), "push"));
+        }
+        for e in &diff.extra {
+            work.push((e.relative_path.clone(), "pull"));
+        }
+        for e in &diff.conflicts {
+            match conflict_resolution {
+                "prefer_source" => work.push((e.relative_path.clone(), "push")),
+                "prefer_dest" => work.push((e.relative_path.clone(), "pull")),
+                _ => {}
+            }
+        }
+    } else {
+        for e in diff.added.iter().chain(diff.changed.iter()) {
+            work.push((e.relative_path.clone(), "push"));
+        }
+    }
+
+    let total = work.len() as u64
+        + if delete_extras && mode == "one_way" {
+            diff.extra.len() as u64
+        } else {
+            0
+        };
+    emit_sync_progress(&app, job_id, "syncing", 0, total, "starting");
+
     let mut current = 0u64;
-    for entry in &to_copy {
-        if is_sync_cancelled(job_id) {
-            clear_sync_cancel(job_id);
+    for (rel, direction) in &work {
+        if job_runner::is_cancelled(job_id) {
+            job_runner::clear_cancel(job_id);
             break;
         }
-        if source_is_remote {
-            let (cid, base_rel) = source_remote.as_ref().unwrap();
-            let remote = join_remote_path(
-                cid,
-                &format!(
-                    "{}{}",
-                    if base_rel.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{base_rel}/")
-                    },
-                    entry.relative_path
-                ),
-            );
-            let local_dest = dest_local.join(&entry.relative_path);
-            download_remote_file(store.as_ref(), &remote, &local_dest).await?;
-        } else if dest_is_remote {
-            let local_src = source_local.join(&entry.relative_path);
-            let (cid, base_rel) = dest_remote.as_ref().unwrap();
-            let remote = join_remote_path(
-                cid,
-                &format!(
-                    "{}{}",
-                    if base_rel.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{base_rel}/")
-                    },
-                    entry.relative_path
-                ),
-            );
-            upload_local_file(store.as_ref(), &local_src, &remote).await?;
+        let copy_res = if direction == &"pull" {
+            copy_rel_path(store.as_ref(), &dest, &source, rel, job_id).await
         } else {
-            let src = source_local.join(&entry.relative_path);
-            let dst = dest_local.join(&entry.relative_path);
-            if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent).map_err(|e| crate::err::with_detail("sync_copy_failed", e))?;
-            }
-            fs::copy(&src, &dst).map_err(|e| crate::err::with_detail("sync_copy_failed", e))?;
+            copy_rel_path(store.as_ref(), &source, &dest, rel, job_id).await
+        };
+        if let Err(e) = copy_res {
+            return Err(e);
         }
         current += 1;
-        emit_sync_progress(
-            &app,
-            job_id,
-            "syncing",
-            current,
-            total,
-            &entry.relative_path,
-        );
+        emit_sync_progress(&app, job_id, "syncing", current, total, rel);
     }
 
-    if delete_extras && !is_sync_cancelled(job_id) {
+    if delete_extras && mode == "one_way" && !job_runner::is_cancelled(job_id) {
         for extra in &diff.extra {
-            if dest_is_remote {
-                // Remote delete not implemented for all backends — skip with clear err on failure path
-                continue;
-            } else if source_is_remote {
-                continue;
-            } else {
-                let p = dest_local.join(&extra.relative_path);
-                let _ = fs::remove_file(p);
-            }
+            delete_rel_at_dest(
+                store.as_ref(),
+                &dest,
+                &extra.relative_path,
+                dest_is_remote,
+                &dest_remote,
+                &dest_local,
+            )
+            .await;
             current += 1;
-            emit_sync_progress(&app, job_id, "deleting", current, total, &extra.relative_path);
+            emit_sync_progress(
+                &app,
+                job_id,
+                "deleting",
+                current,
+                total,
+                &extra.relative_path,
+            );
         }
     }
 
-    clear_sync_cancel(job_id);
+    job_runner::end_job(job_id);
+    emit_sync_progress(&app, job_id, "done", total, total, "");
     Ok(diff)
 }

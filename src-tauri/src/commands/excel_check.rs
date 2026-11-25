@@ -16,9 +16,10 @@ use super::excel_remote::{
     scan_remote_folder_tree_shallow,
 };
 use super::excel_runtime::{
-    check_concurrency, clear_cancel, collect_contents_under_cached, collect_names_under_cached,
-    emit_progress, is_cancelled, list_person_folders, resolve_job_id,
+    check_concurrency, collect_contents_under_cached, collect_names_under_cached, emit_progress,
+    list_person_folders,
 };
+use crate::job_runner::{self, JobKind};
 use super::remote::SmbSessionStore;
 
 const INTEGRITY_PERSON_FOLDER_SOFT_CAP: usize = 500_000;
@@ -594,7 +595,7 @@ pub async fn match_excel_with_folder(
     if let Some(ref out) = output_path {
         crate::path_util::validate_user_path(out)?;
     }
-    let job_id = resolve_job_id(job_id);
+    let job_id = job_runner::resolve_or_begin(job_id, JobKind::Excel);
 
     let pre_names = if crate::path_util::is_remote_path(&folder_path) {
         emit_progress(&app, job_id, "scanning", 0, 0, "");
@@ -617,7 +618,7 @@ pub async fn match_excel_with_folder(
             output_path,
             pre_names,
         );
-        clear_cancel(job_id);
+        job_runner::end_job(job_id);
         result
     })
     .await
@@ -652,7 +653,7 @@ fn match_excel_with_folder_sync(
         .worksheet_range(&sheet_name)
         .map_err(|e| crate::err::with_detail("excel_sheet_read_failed", e))?;
 
-    if is_cancelled(job_id) {
+    if job_runner::is_cancelled(job_id) {
         return Ok(ExcelMatchResult {
             total_rows: 0,
             matched_count: 0,
@@ -677,7 +678,7 @@ fn match_excel_with_folder_sync(
         }
     };
 
-    let cancelled = is_cancelled(job_id);
+    let cancelled = job_runner::is_cancelled(job_id);
     emit_progress(&app, job_id, "matching", 0, 0, "");
 
     let mut values: Vec<(usize, String)> = Vec::new();
@@ -836,7 +837,7 @@ pub async fn check_folder_integrity(
     if let Some(ref out) = output_path {
         crate::path_util::validate_user_path(out)?;
     }
-    let job_id = resolve_job_id(job_id);
+    let job_id = job_runner::resolve_or_begin(job_id, JobKind::Excel);
 
     if crate::path_util::is_remote_path(&target_folder) {
         let result = check_folder_integrity_remote(
@@ -849,14 +850,14 @@ pub async fn check_folder_integrity(
             output_path,
         )
         .await;
-        clear_cancel(job_id);
+        job_runner::end_job(job_id);
         return result;
     }
 
     tokio::task::spawn_blocking(move || {
         let result =
             check_folder_integrity_sync(app, job_id, target_folder, templates, name_pattern, output_path);
-        clear_cancel(job_id);
+        job_runner::end_job(job_id);
         result
     })
     .await
@@ -886,7 +887,7 @@ async fn check_folder_integrity_remote(
     let mut complete_count = 0usize;
 
     for (idx, (folder_name, folder_path)) in person_folders.into_iter().enumerate() {
-        if is_cancelled(job_id) {
+        if job_runner::is_cancelled(job_id) {
             break;
         }
         let extracted_name = extract_name_from_folder(&folder_name, &name_pattern);
@@ -928,7 +929,7 @@ async fn check_folder_integrity_remote(
         }
     }
 
-    let cancelled = is_cancelled(job_id);
+    let cancelled = job_runner::is_cancelled(job_id);
     let total_folders = results.len();
     let incomplete_count = total_folders - complete_count;
 
@@ -1039,7 +1040,7 @@ fn check_one_person_folder(
     name_pattern: &str,
     job_id: u64,
 ) -> Option<(FolderIntegrityResult, bool)> {
-    if is_cancelled(job_id) {
+    if job_runner::is_cancelled(job_id) {
         return None;
     }
     let folder_name = path
@@ -1114,7 +1115,7 @@ fn check_folder_integrity_sync(
         person_folders
             .par_iter()
             .filter_map(|path| {
-                if is_cancelled(job_id) {
+                if job_runner::is_cancelled(job_id) {
                     return None;
                 }
                 let outcome = check_one_person_folder(path, &templates, &name_pattern, job_id)?;
@@ -1130,7 +1131,7 @@ fn check_folder_integrity_sync(
             .collect()
     });
 
-    let cancelled = is_cancelled(job_id);
+    let cancelled = job_runner::is_cancelled(job_id);
     truncated = trunc_flag.load(Ordering::Relaxed) > 0;
     let complete_count = results.iter().filter(|r| r.is_complete).count();
     let total_folders = results.len();
@@ -1388,7 +1389,7 @@ pub async fn check_integrity_with_excel(
     if let Some(ref out) = output_path {
         crate::path_util::validate_user_path(out)?;
     }
-    let job_id = resolve_job_id(job_id);
+    let job_id = job_runner::resolve_or_begin(job_id, JobKind::Excel);
 
     if crate::path_util::is_remote_path(&target_folder) {
         let result = check_integrity_with_excel_remote(
@@ -1404,7 +1405,7 @@ pub async fn check_integrity_with_excel(
             output_path,
         )
         .await;
-        clear_cancel(job_id);
+        job_runner::end_job(job_id);
         return result;
     }
 
@@ -1420,7 +1421,7 @@ pub async fn check_integrity_with_excel(
             folder_match_mode,
             output_path,
         );
-        clear_cancel(job_id);
+        job_runner::end_job(job_id);
         result
     })
     .await
@@ -1521,7 +1522,7 @@ async fn check_integrity_with_excel_remote(
     emit_progress(&app, job_id, "scanning", 0, unique_paths.len() as u64, "");
     let mut cache: HashMap<String, (HashSet<String>, HashMap<String, String>)> = HashMap::new();
     for (i, matched_path) in unique_paths.iter().enumerate() {
-        if is_cancelled(job_id) {
+        if job_runner::is_cancelled(job_id) {
             break;
         }
         let key = matched_path.to_string_lossy().to_string();
@@ -1545,7 +1546,7 @@ async fn check_integrity_with_excel_remote(
     let mut not_found_count = 0;
 
     for (i, (row_idx, name)) in names.iter().enumerate() {
-        if is_cancelled(job_id) {
+        if job_runner::is_cancelled(job_id) {
             break;
         }
         let matched_folder = bound[i].clone();
@@ -1610,7 +1611,7 @@ async fn check_integrity_with_excel_remote(
         });
     }
 
-    let cancelled = is_cancelled(job_id);
+    let cancelled = job_runner::is_cancelled(job_id);
     let total_rows = items.len();
 
     // Annotate export still needs original sheet — reuse local sync writer via blocking re-open
@@ -1817,7 +1818,7 @@ fn check_integrity_with_excel_sync(
     let mut truncated = false;
 
     for path in list_person_folders(folder)? {
-        if is_cancelled(job_id) {
+        if job_runner::is_cancelled(job_id) {
             break;
         }
         folder_count += 1;
@@ -1890,7 +1891,7 @@ fn check_integrity_with_excel_sync(
 
     pool.install(|| {
         unique_paths.par_iter().for_each(|matched_path| {
-            if is_cancelled(job_id) {
+            if job_runner::is_cancelled(job_id) {
                 return;
             }
             let (contents, content_paths, folder_truncated) =
@@ -1927,7 +1928,7 @@ fn check_integrity_with_excel_sync(
     let mut not_found_count = 0;
 
     for (i, (row_idx, name)) in names.iter().enumerate() {
-        if is_cancelled(job_id) {
+        if job_runner::is_cancelled(job_id) {
             break;
         }
         let matched_folder = bound[i].clone();
@@ -1998,7 +1999,7 @@ fn check_integrity_with_excel_sync(
         }
     }
 
-    let cancelled = is_cancelled(job_id);
+    let cancelled = job_runner::is_cancelled(job_id);
     let total_rows = items.len();
 
     let final_output_path = if let Some(out_path) = output_path {

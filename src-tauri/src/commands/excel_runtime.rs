@@ -3,7 +3,7 @@
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
@@ -11,9 +11,6 @@ use walkdir::WalkDir;
 
 pub const SCAN_ENTRY_SOFT_CAP: usize = 2_000_000;
 pub const PER_FOLDER_ENTRY_SOFT_CAP: usize = 500_000;
-
-static EXCEL_JOB_ID: AtomicU64 = AtomicU64::new(0);
-static EXCEL_CANCEL_ID: AtomicU64 = AtomicU64::new(0);
 
 const CACHE_TTL: Duration = Duration::from_secs(90);
 const CACHE_MAX_ENTRIES: usize = 16;
@@ -56,41 +53,6 @@ fn listing_cache() -> &'static Mutex<ListingCache> {
             contents: HashMap::new(),
         })
     })
-}
-
-fn begin_job() -> u64 {
-    EXCEL_JOB_ID.fetch_add(1, Ordering::SeqCst) + 1
-}
-
-#[tauri::command]
-pub fn prepare_excel_check() -> Result<u64, String> {
-    Ok(begin_job())
-}
-
-#[tauri::command]
-pub fn cancel_excel_check(job_id: Option<u64>) -> Result<(), String> {
-    let id = job_id
-        .filter(|v| *v > 0)
-        .unwrap_or_else(|| EXCEL_JOB_ID.load(Ordering::SeqCst));
-    if id > 0 {
-        EXCEL_CANCEL_ID.store(id, Ordering::SeqCst);
-    }
-    Ok(())
-}
-
-pub fn resolve_job_id(job_id: Option<u64>) -> u64 {
-    match job_id {
-        Some(id) if id > 0 => id,
-        _ => begin_job(),
-    }
-}
-
-pub fn is_cancelled(job_id: u64) -> bool {
-    EXCEL_CANCEL_ID.load(Ordering::SeqCst) == job_id
-}
-
-pub fn clear_cancel(job_id: u64) {
-    let _ = EXCEL_CANCEL_ID.compare_exchange(job_id, 0, Ordering::SeqCst, Ordering::SeqCst);
 }
 
 pub fn emit_progress(
@@ -213,7 +175,7 @@ pub fn collect_names_under_cached(
 
     let (names, truncated) = collect_names_under(root, job_id, progress);
 
-    if !is_cancelled(job_id) {
+    if !crate::job_runner::is_cancelled(job_id) {
         if let Ok(mut guard) = listing_cache().lock() {
             prune_names_cache(&mut guard);
             guard.names.insert(
@@ -253,7 +215,7 @@ pub fn collect_contents_under_cached(
 
     let (contents, content_paths, truncated) = collect_contents_under(root, job_id);
 
-    if !is_cancelled(job_id) {
+    if !crate::job_runner::is_cancelled(job_id) {
         if let Ok(mut guard) = listing_cache().lock() {
             prune_contents_cache(&mut guard);
             guard.contents.insert(
@@ -287,7 +249,7 @@ fn collect_names_under(
         .into_iter()
         .filter_map(|e| e.ok())
     {
-        if is_cancelled(job_id) {
+        if crate::job_runner::is_cancelled(job_id) {
             break;
         }
         if entry.path() == root {
@@ -332,7 +294,7 @@ fn collect_contents_under(
         .into_iter()
         .filter_map(|e| e.ok())
     {
-        if is_cancelled(job_id) {
+        if crate::job_runner::is_cancelled(job_id) {
             break;
         }
         if entry.path() == root {

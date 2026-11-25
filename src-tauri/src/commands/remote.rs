@@ -938,7 +938,7 @@ pub async fn transfer_remote_to_local_job(
     conflict: &str,
     job_id: u64,
 ) -> Result<(u64, u64, u64, Vec<String>), String> {
-    if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+    if job_id > 0 && crate::job_runner::is_cancelled(job_id) {
         return Err(err::code("transfer_cancelled"));
     }
     let (conn_id, rel) = parse_remote_path(source_remote)?;
@@ -989,7 +989,7 @@ pub async fn transfer_remote_to_local_job(
                 _ => return Err(err::code("invalid_conflict_resolution")),
             }
         }
-        if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+        if job_id > 0 && crate::job_runner::is_cancelled(job_id) {
             return Err(err::code("transfer_cancelled"));
         }
         match download_remote_file(store, source_remote, &dest).await {
@@ -1021,7 +1021,7 @@ pub async fn transfer_remote_to_local_job(
     walk_remote_files(store, &conn_id, &rel, &mut files, 50_000).await?;
 
     for (rpath, _size, is_directory) in files {
-        if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+        if job_id > 0 && crate::job_runner::is_cancelled(job_id) {
             return Err(err::code("transfer_cancelled"));
         }
         let (_cid, child_rel) = parse_remote_path(&rpath)?;
@@ -1062,7 +1062,7 @@ pub async fn transfer_local_to_remote_job(
     conflict: &str,
     job_id: u64,
 ) -> Result<(u64, u64, u64, Vec<String>), String> {
-    if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+    if job_id > 0 && crate::job_runner::is_cancelled(job_id) {
         return Err(err::code("transfer_cancelled"));
     }
     let (conn_id, target_rel) = parse_remote_path(target_remote_dir)?;
@@ -1138,7 +1138,7 @@ pub async fn transfer_local_to_remote_job(
 
     let walker = walkdir::WalkDir::new(source_local).follow_links(false);
     for entry in walker.into_iter().flatten() {
-        if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+        if job_id > 0 && crate::job_runner::is_cancelled(job_id) {
             return Err(err::code("transfer_cancelled"));
         }
         let path = entry.path();
@@ -1187,6 +1187,162 @@ pub async fn transfer_local_to_remote_job(
     }
 
     Ok((transferred, skipped, failed, errors))
+}
+
+fn r2r_staging_dir(job_id: u64, source_remote: &str) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source_remote.hash(&mut hasher);
+    let tag = hasher.finish();
+    let base = if job_id > 0 {
+        job_id.to_string()
+    } else {
+        "adhoc".into()
+    };
+    std::env::temp_dir()
+        .join("filetally_r2r")
+        .join(format!("{base}_{tag:x}"))
+}
+
+fn top_level_item(dir: &Path) -> Result<PathBuf, String> {
+    let mut entries = std::fs::read_dir(dir).map_err(|e| err::with_detail("r2r_staging_failed", e))?;
+    let first = entries
+        .next()
+        .transpose()
+        .map_err(|e| err::with_detail("r2r_staging_failed", e))?
+        .ok_or_else(|| err::code("r2r_staging_empty"))?;
+    Ok(first.path())
+}
+
+/// Stage remote → local temp → remote (same connection or cross-connection).
+pub async fn transfer_remote_to_remote_job(
+    store: &RemoteSessionStore,
+    source_remote: &str,
+    target_remote_dir: &str,
+    conflict: &str,
+    job_id: u64,
+) -> Result<(u64, u64, u64, Vec<String>), String> {
+    if job_id > 0 && crate::job_runner::is_cancelled(job_id) {
+        return Err(err::code("transfer_cancelled"));
+    }
+    let staging = r2r_staging_dir(job_id, source_remote);
+    if staging.exists() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    std::fs::create_dir_all(&staging).map_err(|e| err::with_detail("r2r_staging_failed", e))?;
+
+    let outcome = async {
+        let (t1, s1, f1, mut e1) = transfer_remote_to_local_job(
+            store,
+            source_remote,
+            &staging,
+            conflict,
+            job_id,
+        )
+        .await?;
+        if job_id > 0 && crate::job_runner::is_cancelled(job_id) {
+            return Err(err::code("transfer_cancelled"));
+        }
+        let local_src = top_level_item(&staging)?;
+        let (t2, s2, f2, e2) = transfer_local_to_remote_job(
+            store,
+            &local_src,
+            target_remote_dir,
+            conflict,
+            job_id,
+        )
+        .await?;
+        e1.extend(e2);
+        Ok((t1.min(t2), s1 + s2, f1 + f2, e1))
+    }
+    .await;
+
+    let _ = std::fs::remove_dir_all(&staging);
+    invalidate_remote_list_cache_many(&[source_remote.to_string(), target_remote_dir.to_string()]);
+    outcome
+}
+
+pub async fn delete_remote_path(store: &RemoteSessionStore, remote_path: &str) -> Result<(), String> {
+    let (conn_id, rel) = parse_remote_path(remote_path)?;
+    let mut guard = store.inner.lock().await;
+    match guard.get_mut(&conn_id) {
+        Some(RemoteSession::Smb(session)) => session
+            .client
+            .delete_file(&mut session.share, &rel)
+            .await
+            .map_err(map_smb_err),
+        Some(RemoteSession::Sftp(session)) => {
+            let s = session.clone();
+            drop(guard);
+            super::remote_sftp::sftp_unlink(&s, &rel)
+        }
+        Some(RemoteSession::WebDav {
+            inner,
+            username,
+            password,
+        }) => {
+            let inner = inner.clone();
+            let user = username.clone();
+            let pass = password.clone();
+            drop(guard);
+            super::remote_webdav::webdav_delete(&inner, &rel, &user, &pass).await
+        }
+        None => Err(session_missing()),
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteRemoteBatchResult {
+    pub deleted: usize,
+    pub failed: usize,
+    pub errors: Vec<String>,
+}
+
+async fn delete_remote_tree(store: &RemoteSessionStore, remote_path: &str) -> Result<(), String> {
+    path_util::validate_user_path(remote_path)?;
+    let (conn_id, rel) = parse_remote_path(remote_path)?;
+    let mut files = Vec::new();
+    if walk_remote_files(store, &conn_id, &rel, &mut files, 500_000).await.is_ok() && !files.is_empty()
+    {
+        let mut targets: Vec<String> = files.iter().map(|(p, _, _)| p.clone()).collect();
+        targets.sort_by_key(|p| std::cmp::Reverse(p.len()));
+        for p in targets {
+            delete_remote_path(store, &p).await?;
+        }
+    }
+    delete_remote_path(store, remote_path).await
+}
+
+#[tauri::command]
+pub async fn delete_remote_paths(
+    store: State<'_, Arc<RemoteSessionStore>>,
+    paths: Vec<String>,
+) -> Result<DeleteRemoteBatchResult, String> {
+    let cache_paths = paths.clone();
+    let mut deleted = 0usize;
+    let mut failed = 0usize;
+    let mut errors = Vec::new();
+    for path in paths {
+        if !path_util::is_remote_path(&path) {
+            failed += 1;
+            errors.push(err::code("remote_path_invalid"));
+            continue;
+        }
+        match delete_remote_tree(store.as_ref(), &path).await {
+            Ok(()) => deleted += 1,
+            Err(e) => {
+                failed += 1;
+                errors.push(e);
+            }
+        }
+    }
+    invalidate_remote_list_cache_many(&cache_paths);
+    Ok(DeleteRemoteBatchResult {
+        deleted,
+        failed,
+        errors,
+    })
 }
 
 fn unique_local_name(path: &Path) -> PathBuf {
@@ -1278,7 +1434,7 @@ pub async fn transfer_files_remote(
     let mut handles = Vec::with_capacity(source_paths.len());
 
     for source in source_paths {
-        if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+        if job_id > 0 && crate::job_runner::is_cancelled(job_id) {
             break;
         }
         let permit = sem
@@ -1295,7 +1451,7 @@ pub async fn transfer_files_remote(
 
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            if job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id) {
+            if job_id > 0 && crate::job_runner::is_cancelled(job_id) {
                 return Err(err::code("transfer_cancelled"));
             }
 
@@ -1347,7 +1503,16 @@ pub async fn transfer_files_remote(
                     )
                     .await
                 }
-                (true, true) => Err(err::code("smb_remote_to_remote_unsupported")),
+                (true, true) => {
+                    transfer_remote_to_remote_job(
+                        store_arc.as_ref(),
+                        &source,
+                        &target_path,
+                        &resolution,
+                        job_id,
+                    )
+                    .await
+                }
                 (false, false) => Err(err::code("smb_not_remote_transfer")),
             };
 
@@ -1359,7 +1524,7 @@ pub async fn transfer_files_remote(
     let mut skipped = 0u64;
     let mut failed = 0u64;
     let mut errors = Vec::new();
-    let mut cancelled = job_id > 0 && crate::commands::transfer::is_transfer_cancelled(job_id);
+    let mut cancelled = job_id > 0 && crate::job_runner::is_cancelled(job_id);
 
     for handle in handles {
         match handle.await {
@@ -1401,6 +1566,10 @@ pub async fn transfer_files_remote(
 
     // Always invalidate after remote writes so browse doesn't show stale listings.
     invalidate_remote_list_cache_many(&invalidate_paths);
+
+    if job_id > 0 {
+        crate::job_runner::end_job(job_id);
+    }
 
     Ok(crate::commands::transfer::TransferResult {
         success: failed == 0 && !cancelled,

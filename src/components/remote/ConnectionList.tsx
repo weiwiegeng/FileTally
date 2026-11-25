@@ -14,6 +14,7 @@ import {
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useRemoteStore, RemoteConnection, openConnectionInFinder } from '../../stores/remoteStore';
+import { useNavigationStore } from '../../stores';
 
 const { Text } = Typography;
 
@@ -42,6 +43,7 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
   const { t } = useTranslation();
   const { connections, removeConnection, connect, disconnect, connecting, getAccessRoot } =
     useRemoteStore();
+  const openBrowserAt = useNavigationStore((s) => s.openBrowserAt);
 
   const getStatusTag = (conn: RemoteConnection) => {
     switch (conn.status) {
@@ -79,6 +81,21 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
         });
       }
     }
+  };
+
+  const handleOpenInBrowser = async (conn: RemoteConnection) => {
+    if (conn.status !== 'connected') {
+      message.loading({ content: t('remote.connectionList.connecting'), key: 'open-browser' });
+      const ok = await connect(conn.id);
+      if (!ok) {
+        message.error({ content: t('remote.connectionList.connectFailedFallback'), key: 'open-browser' });
+        return;
+      }
+      message.success({ content: t('remote.connectionList.connectedSuccess'), key: 'open-browser' });
+    }
+    const path = `remote://${conn.id}/`;
+    openBrowserAt(path, 'left');
+    message.success(t('remote.connectionList.openInBrowserSuccess'));
   };
 
   const handleBrowse = async (conn: RemoteConnection) => {
@@ -154,6 +171,14 @@ export const ConnectionList: React.FC<ConnectionListProps> = ({
                   icon={<FolderOpenOutlined />}
                   onClick={() => handleBrowse(conn)}
                   disabled={conn.status !== 'connected' && (conn.mode || 'direct') === 'direct'}
+                />
+              </Tooltip>,
+              <Tooltip title={t('remote.connectionList.openInBrowser')} key="open-browser">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<CloudServerOutlined />}
+                  onClick={() => void handleOpenInBrowser(conn)}
                 />
               </Tooltip>,
               <Tooltip title={t('remote.connectionList.tooltipEdit')} key="edit">

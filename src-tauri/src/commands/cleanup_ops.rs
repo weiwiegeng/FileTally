@@ -128,6 +128,85 @@ fn is_cleanup_allowed_path(path: &Path) -> bool {
     false
 }
 
+fn is_dangerous_trash_path(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let dangerous = [
+        "/",
+        "/System",
+        "/usr",
+        "/bin",
+    ];
+    for d in dangerous {
+        if normalized == d || normalized.starts_with(&format!("{d}/")) {
+            return true;
+        }
+    }
+    if normalized.len() >= 2 {
+        let upper = normalized.to_uppercase();
+        if upper.starts_with("C:/WINDOWS") || upper.starts_with("C:\\WINDOWS") {
+            return true;
+        }
+    }
+    false
+}
+
+fn validate_user_trash_paths(paths: &[String]) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    for p in paths {
+        crate::path_util::validate_user_path(p)?;
+        if crate::path_util::is_remote_path(p) {
+            return Err(crate::err::code("cleanup_remote_unsupported"));
+        }
+        let path = Path::new(p);
+        if is_dangerous_trash_path(path) {
+            return Err(crate::err::code("trash_path_dangerous"));
+        }
+        if !path.exists() {
+            return Err(crate::err::with_detail("path_not_found", p));
+        }
+        out.push(path.to_path_buf());
+    }
+    Ok(out)
+}
+
+/// Remove stale remote-to-remote staging dirs under temp (`filetally_r2r`).
+#[tauri::command]
+pub fn cleanup_r2r_temp(max_age_secs: Option<u64>) -> Result<u64, String> {
+    use std::time::{Duration, SystemTime};
+
+    let root = std::env::temp_dir().join("filetally_r2r");
+    if !root.is_dir() {
+        return Ok(0);
+    }
+    let max_age = max_age_secs.unwrap_or(86_400);
+    let now = SystemTime::now();
+    let mut removed = 0u64;
+    let entries = fs::read_dir(&root).map_err(|e| crate::err::with_detail("read_dir_failed", e))?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let meta = entry.metadata().ok();
+        let age_ok = if max_age == 0 {
+            true
+        } else if let Some(m) = meta.as_ref().and_then(|x| x.modified().ok()) {
+            now.duration_since(m).unwrap_or(Duration::ZERO).as_secs() >= max_age
+        } else {
+            true
+        };
+        if !age_ok {
+            continue;
+        }
+        let ok = if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        if ok.is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 fn validate_cleanup_paths(paths: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
     for p in paths {
@@ -147,7 +226,7 @@ fn validate_cleanup_paths(paths: &[String]) -> Result<Vec<PathBuf>, String> {
     Ok(out)
 }
 
-fn unique_trash_name(base: &str) -> String {
+pub(crate) fn unique_trash_name(base: &str) -> String {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -260,6 +339,49 @@ fn remove_path_any(path: &Path) -> Result<(), String> {
     } else {
         fs::remove_file(path).map_err(|e| crate::err::with_detail("cleanup_restore_failed", e))
     }
+}
+
+#[tauri::command]
+pub fn trash_user_paths(paths: Vec<String>) -> Result<DeleteCleanupResult, String> {
+    let validated = validate_user_trash_paths(&paths)?;
+    let mut deleted = 0usize;
+    let mut failed = 0usize;
+    let mut errors = Vec::new();
+
+    match move_to_trash_batch(&validated) {
+        Ok(batch) => {
+            let count = batch.items.len();
+            let batch_id = batch.id.clone();
+            let mut manifest = load_manifest()?;
+            manifest.batches.push(batch.clone());
+            match save_manifest(&manifest) {
+                Ok(()) => deleted = count,
+                Err(e) => {
+                    for item in batch.items.iter().rev() {
+                        let from = trash_root()
+                            .ok()
+                            .map(|r| r.join(&item.trashed_rel));
+                        if let Some(from) = from {
+                            let _ = fs::rename(&from, Path::new(&item.original_path));
+                        }
+                    }
+                    let _ = fs::remove_dir_all(trash_root()?.join(&batch_id));
+                    failed = count;
+                    errors.push(e);
+                }
+            }
+        }
+        Err(e) => {
+            failed = validated.len();
+            errors.push(e);
+        }
+    }
+
+    Ok(DeleteCleanupResult {
+        deleted,
+        failed,
+        errors,
+    })
 }
 
 #[tauri::command]
@@ -500,4 +622,18 @@ fn path_has_parent_escape(path: &Path) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unique_trash_name;
+
+    #[test]
+    fn unique_trash_name_includes_base() {
+        let a = unique_trash_name("batch");
+        let b = unique_trash_name("batch");
+        assert!(a.starts_with("batch_"));
+        assert!(b.starts_with("batch_"));
+        assert_ne!(a, b);
+    }
 }

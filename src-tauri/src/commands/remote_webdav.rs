@@ -210,6 +210,30 @@ pub async fn webdav_write_file(
     Ok(())
 }
 
+pub async fn webdav_delete(
+    session: &WebDavSession,
+    rel: &str,
+    username: &str,
+    password: &str,
+) -> Result<(), String> {
+    let rel = rel.trim_matches('/');
+    if rel.is_empty() {
+        return Err(err::code("remote_path_is_dir"));
+    }
+    let url = format!("{}{rel}", session.base_url);
+    let resp = session
+        .client
+        .delete(&url)
+        .basic_auth(username, Some(password))
+        .send()
+        .await
+        .map_err(|e| err::with_detail("webdav_delete_failed", e))?;
+    if !resp.status().is_success() && resp.status() != StatusCode::NO_CONTENT {
+        return Err(err::with_detail("webdav_delete_failed", resp.status()));
+    }
+    Ok(())
+}
+
 pub async fn walk_webdav_files(
     session: &WebDavSession,
     conn_id: &str,

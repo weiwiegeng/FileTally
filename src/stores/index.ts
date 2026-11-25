@@ -9,3 +9,6 @@ export * from './checkConfigStore';
 export * from './taskStore';
 export * from './placesStore';
 export * from './tagStore';
+export * from './dualPaneStore';
+export * from './navigationStore';
+export * from './syncPresetsStore';

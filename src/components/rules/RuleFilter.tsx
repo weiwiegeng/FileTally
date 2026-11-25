@@ -106,7 +106,7 @@ export const RuleFilter: React.FC = () => {
     setLoading(true);
     let taskId = '';
     try {
-      const jid = await invoke<number>('prepare_rule_filter');
+      const jid = await (await import('../../utils/jobs')).prepareJob('ruleFilter');
       setJobId(jid);
       taskId = makeTaskId('rules', jid);
       upsertTask({
@@ -144,7 +144,7 @@ export const RuleFilter: React.FC = () => {
 
   const cancel = async () => {
     try {
-      await invoke('cancel_rule_filter', { jobId: jobId || null });
+      await (await import('../../utils/jobs')).cancelJob(jobId || null, 'ruleFilter');
     } catch {
       // ignore
     }

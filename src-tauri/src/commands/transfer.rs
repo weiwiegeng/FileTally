@@ -12,10 +12,6 @@ type BackupPair = (PathBuf, PathBuf);
 
 const TRANSFER_MAX_DEPTH: usize = 64;
 
-/// Per-job cancel tokens (avoids stomping concurrent/next transfers)
-static TRANSFER_JOB_ID: AtomicU64 = AtomicU64::new(0);
-static TRANSFER_CANCEL_ID: AtomicU64 = AtomicU64::new(0);
-
 /// 冲突文件信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,39 +109,9 @@ pub struct PathInfo {
     pub size_formatted: String,
 }
 
-fn begin_transfer_job() -> u64 {
-    TRANSFER_JOB_ID.fetch_add(1, Ordering::SeqCst) + 1
-}
-
-pub(crate) fn is_transfer_cancelled(job_id: u64) -> bool {
-    TRANSFER_CANCEL_ID.load(Ordering::SeqCst) == job_id
-}
-
-fn is_cancelled(job_id: u64) -> bool {
-    is_transfer_cancelled(job_id)
-}
-
 #[tauri::command]
 pub fn get_transfer_bandwidth_limit() -> Result<u64, String> {
     Ok(TRANSFER_BANDWIDTH_BPS.load(Ordering::SeqCst))
-}
-
-/// 预分配传输 job id
-#[tauri::command]
-pub fn prepare_transfer() -> Result<u64, String> {
-    Ok(begin_transfer_job())
-}
-
-/// 取消指定传输 job；未传 job_id 时取消当前 job
-#[tauri::command]
-pub fn cancel_transfer(job_id: Option<u64>) -> Result<(), String> {
-    let id = job_id
-        .filter(|v| *v > 0)
-        .unwrap_or_else(|| TRANSFER_JOB_ID.load(Ordering::SeqCst));
-    if id > 0 {
-        TRANSFER_CANCEL_ID.store(id, Ordering::SeqCst);
-    }
-    Ok(())
 }
 
 fn rollback_created(paths: &[PathBuf]) {
@@ -327,7 +293,7 @@ fn copy_file_cancellable(
 ) -> std::io::Result<()> {
     use std::io::{Seek, SeekFrom};
 
-    if is_cancelled(job_id) {
+    if crate::job_runner::is_cancelled(job_id) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "cancelled",
@@ -363,7 +329,7 @@ fn copy_file_cancellable(
     let mut buf = vec![0u8; COPY_CHUNK_SIZE];
     let copy_result = (|| -> std::io::Result<()> {
         loop {
-            if is_cancelled(job_id) {
+            if crate::job_runner::is_cancelled(job_id) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "cancelled",
@@ -787,10 +753,8 @@ pub async fn transfer_files(
             .any(|p| crate::path_util::is_remote_path(p));
 
     if involves_remote {
-        let resolved_job = match job_id {
-            Some(id) if id > 0 => id,
-            _ => begin_transfer_job(),
-        };
+        let resolved_job =
+            crate::job_runner::resolve_or_begin(job_id, crate::job_runner::JobKind::Transfer);
         return crate::commands::remote::transfer_files_remote(
             app,
             store,
@@ -818,10 +782,19 @@ fn transfer_files_sync(
     job_id: Option<u64>,
 ) -> Result<TransferResult, String> {
     let resolution = validate_conflict_resolution(&conflict_resolution)?;
-    let job_id = match job_id {
-        Some(id) if id > 0 => id,
-        _ => begin_transfer_job(),
-    };
+    let job_id =
+        crate::job_runner::resolve_or_begin(job_id, crate::job_runner::JobKind::Transfer);
+
+    crate::commands::diag::diag_log(
+        "info",
+        "transfer_start",
+        format!(
+            "{} sources -> {}",
+            source_paths.len(),
+            target_path
+        ),
+        Some(job_id),
+    );
 
     crate::path_util::validate_user_path(&target_path)?;
     for p in &source_paths {
@@ -887,7 +860,7 @@ fn transfer_files_sync(
     let mut pending_backups: Vec<BackupPair> = Vec::new();
 
     for source_path in &source_paths {
-        if is_cancelled(job_id) {
+        if crate::job_runner::is_cancelled(job_id) {
             cancelled = true;
             break;
         }
@@ -1023,7 +996,7 @@ fn transfer_files_sync(
                 if is_file_nofollow(source) {
                     files_ok.fetch_add(1, Ordering::SeqCst);
                 }
-                if is_cancelled(job_id) {
+                if crate::job_runner::is_cancelled(job_id) {
                     cancelled = true;
                     break;
                 }
@@ -1100,7 +1073,7 @@ fn transfer_files_sync(
         );
     }
 
-    Ok(TransferResult {
+    let result = TransferResult {
         success: failed == 0 && !cancelled && !truncated,
         transferred,
         skipped,
@@ -1108,7 +1081,35 @@ fn transfer_files_sync(
         cancelled,
         truncated,
         errors,
-    })
+    };
+    crate::commands::diag::diag_log(
+        "info",
+        "transfer_end",
+        format!(
+            "ok={} transferred={} skipped={} failed={} cancelled={}",
+            result.success, result.transferred, result.skipped, result.failed, result.cancelled
+        ),
+        Some(job_id),
+    );
+    crate::job_runner::end_job(job_id);
+    Ok(result)
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::validate_conflict_resolution;
+
+    #[test]
+    fn accepts_known_resolutions() {
+        for r in ["skip", "rename", "overwrite"] {
+            assert_eq!(validate_conflict_resolution(r).unwrap(), r);
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_resolution() {
+        assert!(validate_conflict_resolution("merge").is_err());
+    }
 }
 
 fn count_files_in_dir(path: &Path, remaining_cap: u64, depth: usize) -> u64 {
@@ -1208,7 +1209,7 @@ fn copy_dir_recursive_with_progress(
             "transfer depth limit exceeded",
         ));
     }
-    if is_cancelled(job_id) {
+    if crate::job_runner::is_cancelled(job_id) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "cancelled",
@@ -1227,7 +1228,7 @@ fn copy_dir_recursive_with_progress(
     fs::create_dir_all(dst)?;
 
     for entry in fs::read_dir(src)? {
-        if is_cancelled(job_id) {
+        if crate::job_runner::is_cancelled(job_id) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",

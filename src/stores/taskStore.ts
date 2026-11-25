@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { invoke } from '@tauri-apps/api/core';
+import { cancelJob } from '../utils/jobs';
 
 export type TaskKind = 'search' | 'transfer' | 'excel' | 'analysis' | 'sync' | 'rules' | 'organize' | 'index';
 export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -47,25 +47,33 @@ interface TaskState {
 
 const HISTORY_CAP = 80;
 
+const kindToJob = (
+  kind: TaskKind
+): 'search' | 'transfer' | 'sync' | 'excel' | 'analysis' | 'ruleFilter' | null => {
+  switch (kind) {
+    case 'search':
+      return 'search';
+    case 'transfer':
+      return 'transfer';
+    case 'sync':
+      return 'sync';
+    case 'excel':
+      return 'excel';
+    case 'analysis':
+      return 'analysis';
+    case 'rules':
+      return 'ruleFilter';
+    default:
+      return null;
+  }
+};
+
 const cancelBackend = async (kind: TaskKind, jobId?: number) => {
   if (!jobId || jobId <= 0) return;
-  const cmd =
-    kind === 'search'
-      ? 'cancel_search'
-      : kind === 'transfer'
-        ? 'cancel_transfer'
-        : kind === 'sync'
-          ? 'cancel_sync'
-          : kind === 'excel'
-            ? 'cancel_excel_check'
-            : kind === 'analysis'
-              ? 'cancel_analysis'
-              : kind === 'rules'
-                ? 'cancel_rule_filter'
-                : null;
-  if (!cmd) return;
+  const jobKind = kindToJob(kind);
+  if (!jobKind) return;
   try {
-    await invoke(cmd, { jobId });
+    await cancelJob(jobId, jobKind);
   } catch {
     // ignore
   }

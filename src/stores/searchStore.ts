@@ -4,6 +4,7 @@ import i18n from '../i18n';
 import { useSettingsStore } from './settingsStore';
 import { mapBackendError } from '../utils/backendError';
 import { makeTaskId, useTaskStore } from './taskStore';
+import { cancelJob as cancelBackendJob, prepareJob } from '../utils/jobs';
 
 export interface SearchMatch {
   lineNumber: number;
@@ -113,10 +114,10 @@ const clearActiveTimeout = () => {
   }
 };
 
-const cancelJob = async (jobId: number) => {
+const cancelSearchBackend = async (jobId: number) => {
   if (jobId <= 0) return;
   try {
-    await invoke('cancel_search', { jobId });
+    await cancelBackendJob(jobId, 'search');
   } catch {
     // ignore
   }
@@ -262,7 +263,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
 
     clearActiveTimeout();
     const prevJobId = activeSearchJobId;
-    await cancelJob(prevJobId);
+    await cancelSearchBackend(prevJobId);
 
     const requestId = get().requestId + 1;
     set({
@@ -315,7 +316,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     let jobId = 0;
     let taskId = '';
     try {
-      jobId = await invoke<number>('prepare_search');
+      jobId = await prepareJob('search');
       activeSearchJobId = jobId;
       taskId = makeTaskId('search', jobId);
       useTaskStore.getState().upsertTask({
@@ -340,7 +341,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     activeTimeoutId = window.setTimeout(() => {
       if (activeTimeoutRequestId !== requestId) return;
       timedOut = true;
-      cancelJob(jobId);
+      cancelSearchBackend(jobId);
     }, timeoutMs);
 
     try {
@@ -479,7 +480,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     }
 
     clearActiveTimeout();
-    await cancelJob(activeSearchJobId);
+    await cancelSearchBackend(activeSearchJobId);
 
     const requestId = get().requestId + 1;
     set({
@@ -505,7 +506,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     let jobId = 0;
     let taskId = '';
     try {
-      jobId = await invoke<number>('prepare_search');
+      jobId = await prepareJob('search');
       activeSearchJobId = jobId;
       taskId = makeTaskId('search', jobId);
       useTaskStore.getState().upsertTask({
@@ -530,7 +531,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     activeTimeoutId = window.setTimeout(() => {
       if (activeTimeoutRequestId !== requestId) return;
       timedOut = true;
-      cancelJob(jobId);
+      cancelSearchBackend(jobId);
     }, timeoutMs);
 
     try {
@@ -623,7 +624,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
         ? i18n.t('search.store.checkCancelled')
         : i18n.t('search.store.searchCancelled'),
     });
-    await cancelJob(jobId);
+    await cancelSearchBackend(jobId);
     if (activeSearchJobId === jobId) {
       activeSearchJobId = 0;
     }

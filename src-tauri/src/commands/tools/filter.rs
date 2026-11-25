@@ -2,7 +2,6 @@ use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
@@ -29,33 +28,6 @@ pub struct RuleFilterOptions {
 }
 
 const FILTER_CAP: usize = 200_000;
-
-static RULE_FILTER_JOB_ID: AtomicU64 = AtomicU64::new(0);
-static RULE_FILTER_CANCEL_ID: AtomicU64 = AtomicU64::new(0);
-
-fn begin_rule_filter_job() -> u64 {
-    RULE_FILTER_JOB_ID.fetch_add(1, Ordering::SeqCst) + 1
-}
-
-fn is_rule_filter_cancelled(job_id: u64) -> bool {
-    RULE_FILTER_CANCEL_ID.load(Ordering::SeqCst) == job_id
-}
-
-fn clear_rule_filter_cancel(job_id: u64) {
-    let _ = RULE_FILTER_CANCEL_ID.compare_exchange(job_id, 0, Ordering::SeqCst, Ordering::SeqCst);
-}
-
-#[tauri::command]
-pub fn prepare_rule_filter() -> Result<u64, String> {
-    Ok(begin_rule_filter_job())
-}
-
-#[tauri::command]
-pub fn cancel_rule_filter(job_id: Option<u64>) -> Result<(), String> {
-    let id = job_id.unwrap_or_else(|| RULE_FILTER_JOB_ID.load(Ordering::SeqCst));
-    RULE_FILTER_CANCEL_ID.store(id, Ordering::SeqCst);
-    Ok(())
-}
 
 fn modified_secs(meta: &fs::Metadata) -> Option<i64> {
     meta.modified()
@@ -128,7 +100,7 @@ pub fn filter_files_by_rules(
     options: RuleFilterOptions,
     job_id: Option<u64>,
 ) -> Result<Vec<FilteredFile>, String> {
-    let job_id = job_id.unwrap_or_else(|| begin_rule_filter_job());
+    let job_id = crate::job_runner::resolve_or_begin(job_id, crate::job_runner::JobKind::RuleFilter);
     path_util::validate_user_path(&root)?;
     if path_util::is_remote_path(&root) {
         return Err(crate::err::code("rule_filter_remote_unsupported"));
@@ -171,8 +143,8 @@ pub fn filter_files_by_rules(
         .into_iter()
         .filter_map(|e| e.ok())
     {
-        if is_rule_filter_cancelled(job_id) {
-            clear_rule_filter_cancel(job_id);
+        if crate::job_runner::is_cancelled(job_id) {
+            crate::job_runner::clear_cancel(job_id);
             break;
         }
         if out.len() >= FILTER_CAP {
@@ -218,6 +190,6 @@ pub fn filter_files_by_rules(
         });
     }
 
-    clear_rule_filter_cancel(job_id);
+    crate::job_runner::clear_cancel(job_id);
     Ok(out)
 }

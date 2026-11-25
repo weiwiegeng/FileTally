@@ -205,7 +205,9 @@ export const BatchOpsModal: React.FC<BatchOpsModalProps> = ({
       {preview && (
         <>
           {preview.unsupported.length > 0 && (
-            <Text type="warning">{t('batch.unsupported', { count: preview.unsupported.length })}</Text>
+            <Text type="warning">
+              {t('batch.unsupported', { count: preview.unsupported.length })}
+            </Text>
           )}
           <Table
             size="small"

@@ -15,6 +15,7 @@ import {
   Tag,
   Spin,
   Tree,
+  Alert,
 } from 'antd';
 import type { TreeDataNode } from 'antd';
 import {
@@ -108,6 +109,11 @@ export const SearchPanel: React.FC = () => {
   const [folderContents, setFolderContents] = useState<FolderContentCache>({});
   const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
   const initializedRef = useRef(false);
+
+  const hasRemoteSearchPath = useMemo(
+    () => searchPaths.some((p) => isRemotePath(p)),
+    [searchPaths]
+  );
 
   // 初次加载时应用设置中的默认值
   useEffect(() => {
@@ -362,7 +368,15 @@ export const SearchPanel: React.FC = () => {
     >
       {/* 搜索栏 */}
       <Space direction="vertical" style={{ width: '100%' }} size="middle">
-      {/* 模式切换 */}
+        {hasRemoteSearchPath && (
+          <Alert
+            type="info"
+            showIcon
+            message={t('search.panel.remoteScanNote')}
+            closable
+          />
+        )}
+        {/* 模式切换 */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Segmented
             value={mode}
