@@ -196,23 +196,93 @@ pub async fn collect_remote_contents(
     Ok((contents, content_paths, truncated))
 }
 
-/// Shallow tree preview (depth 1) for remote folders.
-pub async fn scan_remote_folder_tree_shallow(
+/// Remote folder tree for UI preview. Returns nested children as
+/// `(name, path, is_dir, nested_children)` plus totals and truncated flag.
+pub async fn scan_remote_folder_tree(
     store: &SmbSessionStore,
     folder_path: &str,
-) -> Result<(Vec<(String, String, bool)>, usize, usize), String> {
-    let entries = super::remote::list_remote_dir_inner(store, folder_path).await?;
-    let mut children = Vec::new();
+    max_depth: usize,
+    entry_cap: usize,
+) -> Result<(Vec<RemoteTreeNode>, usize, usize, bool), String> {
+    let depth = max_depth.clamp(1, 8);
     let mut files = 0usize;
     let mut folders = 0usize;
-    for e in entries {
-        if e.is_dir {
-            folders += 1;
-        } else {
-            files += 1;
-        }
-        children.push((e.name, e.path, e.is_dir));
-    }
-    // root itself counts as 1 folder in local scanner; keep consistent-ish: only children
-    Ok((children, files, folders))
+    let mut truncated = false;
+    let children = build_remote_tree(
+        store,
+        folder_path,
+        1,
+        depth,
+        &mut files,
+        &mut folders,
+        &mut truncated,
+        entry_cap,
+    )
+    .await?;
+    Ok((children, files, folders, truncated))
 }
+
+#[derive(Debug, Clone)]
+pub struct RemoteTreeNode {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub children: Vec<RemoteTreeNode>,
+}
+
+async fn build_remote_tree(
+    store: &SmbSessionStore,
+    folder_path: &str,
+    current_depth: usize,
+    max_depth: usize,
+    files: &mut usize,
+    folders: &mut usize,
+    truncated: &mut bool,
+    entry_cap: usize,
+) -> Result<Vec<RemoteTreeNode>, String> {
+    if *truncated || current_depth > max_depth {
+        return Ok(Vec::new());
+    }
+    let entries = super::remote::list_remote_dir_inner(store, folder_path).await?;
+    let mut children = Vec::new();
+    for e in entries {
+        if *files + *folders >= entry_cap {
+            *truncated = true;
+            break;
+        }
+        if e.is_dir {
+            *folders += 1;
+            let nested = if current_depth < max_depth && !*truncated {
+                Box::pin(build_remote_tree(
+                    store,
+                    &e.path,
+                    current_depth + 1,
+                    max_depth,
+                    files,
+                    folders,
+                    truncated,
+                    entry_cap,
+                ))
+                .await?
+            } else {
+                Vec::new()
+            };
+            children.push(RemoteTreeNode {
+                name: e.name,
+                path: e.path,
+                is_dir: true,
+                children: nested,
+            });
+        } else {
+            *files += 1;
+            children.push(RemoteTreeNode {
+                name: e.name,
+                path: e.path,
+                is_dir: false,
+                children: Vec::new(),
+            });
+        }
+    }
+    Ok(children)
+}
+

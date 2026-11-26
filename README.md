@@ -26,7 +26,7 @@
 
 | 模块 | 一句话 |
 |------|--------|
-| 智能检查 | Excel 名单 ↔ 目录核对（含远程） |
+| 资料核对 | 通用名单核对 + 资料齐全；导出原表副本并附「已完成 / 资料不全 / 未匹配」sheet（路径可点） |
 | 智能分析 | 空间统计、清理建议、可配置 AI 解读 |
 
 侧栏「更多」中入口权重低于工作区 / 传输与同步。
@@ -74,8 +74,8 @@ npm run tauri:build
 | Linux | `*_amd64.AppImage` |
 
 ```bash
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.0.2
+git push origin v1.0.2
 # 或在 Actions → Release → Run workflow
 ```
 

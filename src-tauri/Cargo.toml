@@ -1,6 +1,6 @@
 [package]
 name = "filetally"
-version = "1.0.1"
+version = "1.0.2"
 description = "FileTally - Local + NAS file workspace"
 authors = ["you"]
 edition = "2021"
